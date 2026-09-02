@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://da4nwobx0g23d"]
+
+[ext_resource type="Script" uid="uid://vbpqses27dby" path="res://sahne.gd" id="1_fe3es"]
+
+[node name="sahne" type="Node2D" unique_id=1500536236]
+script = ExtResource("1_fe3es")
