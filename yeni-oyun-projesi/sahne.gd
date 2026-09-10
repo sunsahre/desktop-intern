@@ -18,8 +18,9 @@ func _ready() -> void:
 	DisplayServer.window_set_position(Vector2i(0, 0))
 	DisplayServer.window_set_size(gercek_ekran)
 	
-	# 4. KİLİT NOKTA: Tıklama geçirme komutu KESİNLİKLE boyutlandırmadan sonra olmalı!
-	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_MOUSE_PASSTHROUGH, true)
+	# 4. Tıklama geçirme: Polygon yöntemi kullanıyoruz (flag değil!)
+	# Boş polygon = başlangıçta her yere tıklama geçer, _process'te güncellenir
+	DisplayServer.window_set_mouse_passthrough(PackedVector2Array())
 	# ------------------------------------
 
 	# Haritayı (JSON) yükle
@@ -50,7 +51,19 @@ func _ready() -> void:
 	gorev_cubugu.add_child(cubuk_alani)
 	add_child(gorev_cubugu)
 	# ------------------------------------
-	
+
+# Her frame'de stickman etrafındaki tıklanabilir alanı güncelle
+func _process(_delta: float) -> void:
+	var stickman_node = get_node_or_null("Stickman")
+	if stickman_node:
+		var pos = stickman_node.global_position
+		var r = 50.0  # Tıklanabilir alan yarıçapı
+		DisplayServer.window_set_mouse_passthrough(PackedVector2Array([
+			Vector2(pos.x - r, pos.y - 60),
+			Vector2(pos.x + r, pos.y - 60),
+			Vector2(pos.x + r, pos.y + 35),
+			Vector2(pos.x - r, pos.y + 35),
+		]))
 # Fonksiyonu şimdi tanımlıyoruz
 func haritayükle(dosyayolu: String) -> void:
 

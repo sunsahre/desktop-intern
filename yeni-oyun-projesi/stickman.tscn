@@ -4,7 +4,7 @@
 
 [sub_resource type="CapsuleShape2D" id="CapsuleShape2D_1"]
 radius = 20.0
-height = 106.0
+height = 72.0
 
 [node name="Stickman" type="CharacterBody2D" unique_id=2123915130]
 collision_layer = 2

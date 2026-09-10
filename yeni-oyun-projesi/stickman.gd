@@ -19,11 +19,11 @@ enum State { IDLE, WALK, JUMP, FALL }
 var current_state: State = State.IDLE
 var facing_right: bool = true
 
-# --- ÇİZİM VE KOZMETİK AYARLAR ---
-var body_color: Color = Color.WHITE
-var outline_color: Color = Color.GREEN
+# --- ÇİZİM VE KOZMETİK AYARLAR (Animation vs Minecraft Turuncu Stickman) ---
+var body_color: Color = Color(1.0, 0.53, 0.0)    # Turuncu dolgu
+var outline_color: Color = Color(0.8, 0.4, 0.0)  # Koyu turuncu çerçeve
 var eye_color: Color = Color.BLACK
-var line_width: float = 3.0
+var line_width: float = 5.0  # Kalın çizgiler (AvM tarzı)
 
 # Yerçekimini proje ayarlarından dinamik çekiyoruz
 var gravity: float = ProjectSettings.get_setting("physics/2d/default_gravity")
@@ -146,10 +146,10 @@ func _draw_idle(dir: float) -> void:
 	draw_line(omuz, sag_dirsek, outline_color, line_width)
 	draw_line(sag_dirsek, sag_el, outline_color, line_width)
 	
-	# KAFA VE YÜZ
+	# KAFA VE YÜZ (AvM tarzı: turuncu dolgu + koyu çerçeve)
 	var kafa_merkez: Vector2 = Vector2(0, -28 + nefes)
-	draw_circle(kafa_merkez, 10.0, body_color)
-	draw_arc(kafa_merkez, 10.0, 0, TAU, 32, outline_color, 2.0)
+	draw_circle(kafa_merkez, 12.0, outline_color)  # Koyu çerçeve
+	draw_circle(kafa_merkez, 10.0, body_color)      # Turuncu dolgu
 	draw_circle(kafa_merkez + Vector2(3.0 * dir, -2), 1.8, eye_color) # Göz
 	
 	var agiz_merkez: Vector2 = kafa_merkez + Vector2(2.0 * dir, 3)
@@ -215,8 +215,8 @@ func _draw_walk(dir: float) -> void:
 	
 	# Kafa ve Yüz
 	var kafa_merkez: Vector2 = Vector2(lean * 1.2, -28 - bounce)
+	draw_circle(kafa_merkez, 12.0, outline_color)
 	draw_circle(kafa_merkez, 10.0, body_color)
-	draw_arc(kafa_merkez, 10.0, 0, TAU, 32, outline_color, 2.0)
 	draw_circle(kafa_merkez + Vector2(4.0 * dir, -2), 1.8, eye_color)
 	
 	var agiz_start: Vector2 = kafa_merkez + Vector2(1.0 * dir, 3)
@@ -251,8 +251,8 @@ func _draw_jump(dir: float) -> void:
 	draw_line(sag_dirsek, sag_el, outline_color, line_width)
 	
 	var kafa_merkez: Vector2 = Vector2(0, -30)
+	draw_circle(kafa_merkez, 12.0, outline_color)
 	draw_circle(kafa_merkez, 10.0, body_color)
-	draw_arc(kafa_merkez, 10.0, 0, TAU, 32, outline_color, 2.0)
 	draw_circle(kafa_merkez + Vector2(3.0 * dir, -3), 2.0, eye_color)
 	
 	draw_circle(kafa_merkez + Vector2(2.0 * dir, 4), 2.5, outline_color)
@@ -288,8 +288,8 @@ func _draw_fall(dir: float) -> void:
 	draw_line(sag_dirsek, sag_el, outline_color, line_width)
 	
 	var kafa_merkez: Vector2 = Vector2(flutter * 0.3, -28)
+	draw_circle(kafa_merkez, 12.0, outline_color)
 	draw_circle(kafa_merkez, 10.0, body_color)
-	draw_arc(kafa_merkez, 10.0, 0, TAU, 32, outline_color, 2.0)
 	draw_circle(kafa_merkez + Vector2(3.0 * dir, -2), 2.5, eye_color)
 	
 	draw_circle(kafa_merkez + Vector2(2.0 * dir, 4), 3.0, outline_color)
