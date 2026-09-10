@@ -1,10 +1,6 @@
 [gd_scene format=3 uid="uid://da4nwobx0g23d"]
 
 [ext_resource type="Script" uid="uid://vbpqses27dby" path="res://sahne.gd" id="1_fe3es"]
-[ext_resource type="PackedScene" uid="uid://c5t1ckm4nsc3n" path="res://stickman.tscn" id="3_nru7j"]
 
 [node name="sahne" type="Node2D" unique_id=1500536236]
 script = ExtResource("1_fe3es")
-
-[node name="Stickman" parent="." unique_id=215046985 instance=ExtResource("3_nru7j")]
-position = Vector2(900, 118.896)

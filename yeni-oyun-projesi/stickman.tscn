@@ -1,0 +1,15 @@
+[gd_scene format=3 uid="uid://c5t1ckm4nsc3n"]
+
+[ext_resource type="Script" uid="uid://drpvx6g7qo0kq" path="res://stickman.gd" id="1_stk"]
+
+[sub_resource type="CapsuleShape2D" id="CapsuleShape2D_1"]
+radius = 20.0
+height = 106.0
+
+[node name="Stickman" type="CharacterBody2D" unique_id=2123915130]
+collision_layer = 2
+script = ExtResource("1_stk")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1358594883]
+position = Vector2(0, -5)
+shape = SubResource("CapsuleShape2D_1")

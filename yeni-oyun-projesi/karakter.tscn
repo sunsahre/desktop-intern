@@ -1,0 +1,21 @@
+[gd_scene format=3 uid="uid://byydsk5c4nr00"]
+
+[ext_resource type="Script" uid="uid://cssnbpxwgvhga" path="res://karakter.gd" id="1_41xbd"]
+
+[sub_resource type="CapsuleShape2D" id="CapsuleShape2D_vngvs"]
+radius = 22.0
+height = 86.0
+
+[node name="karakter" type="CharacterBody2D" unique_id=1769460381]
+script = ExtResource("1_41xbd")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1259268823]
+position = Vector2(-1, -7)
+shape = SubResource("CapsuleShape2D_vngvs")
+
+[node name="ColorRect" type="ColorRect" parent="." unique_id=816982075]
+offset_left = -19.0
+offset_top = -46.0
+offset_right = 16.0
+offset_bottom = 33.0
+color = Color(0.6211452, 0.85600317, 0.7612667, 1)
