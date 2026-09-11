@@ -1,6 +1,15 @@
 extends Node2D
 
-# Called when the node enters the scene tree for the first time.
+# --- NAVİGASYON SİSTEMİ ---
+var nav: Navigasyon = null
+var ikon_verileri: Array = []  # harita.json'dan okunan ikon listesi
+var hedef_zamanlayici: Timer = null
+const HEDEF_BEKLEME_SURESI := 3.0  # Hedefe varınca kaç sn bekle
+
+# --- MANUEL HEDEFLEME (Sürükle & Bırak) ---
+var surukleniyor: bool = false
+var fare_pozisyonu: Vector2 = Vector2.ZERO
+
 func _ready() -> void:
 	
 	# --- PENCERE VE ŞEFFAFLIK AYARLARI ---
@@ -23,6 +32,13 @@ func _ready() -> void:
 	DisplayServer.window_set_mouse_passthrough(PackedVector2Array())
 	# ------------------------------------
 
+	# Masaüstü ikonlarını güncelle (Python scriptini çalıştır)
+	print("Masaüstü ikonları taranıyor... Lütfen bekleyin.")
+	var python_yolu = ProjectSettings.globalize_path("res://../.venv/Scripts/python.exe")
+	var script_yolu = ProjectSettings.globalize_path("res://../test.py")
+	OS.execute(python_yolu, [script_yolu])
+	print("Tarama tamamlandı!")
+	
 	# Haritayı (JSON) yükle
 	haritayükle("res://harita.json")
 	
@@ -51,6 +67,26 @@ func _ready() -> void:
 	gorev_cubugu.add_child(cubuk_alani)
 	add_child(gorev_cubugu)
 	# ------------------------------------
+	
+	# --- NAVİGASYON SİSTEMİNİ KUR ---
+	nav = Navigasyon.new()
+	var ekran = DisplayServer.screen_get_size()
+	nav.grafi_kur(ikon_verileri, ekran)
+	
+	# Stickman sinyalini bağla
+	var stickman = get_node_or_null("Stickman")
+	if stickman:
+		stickman.rota_tamamlandi.connect(_hedefe_varildi)
+		stickman.blok_koy.connect(_blok_yerlestir)
+		stickman.OYUNCU_KONTROLU = false  # AI kontrolüne geç
+		# İlk hedefi 2 saniye sonra seç (düşüp yere insene kadar bekle)
+		hedef_zamanlayici = Timer.new()
+		hedef_zamanlayici.one_shot = true
+		hedef_zamanlayici.wait_time = 2.0
+		hedef_zamanlayici.timeout.connect(_yeni_hedef_sec)
+		add_child(hedef_zamanlayici)
+		hedef_zamanlayici.start()
+		print("AI navigasyon aktif!")
 
 # Her frame'de stickman etrafındaki tıklanabilir alanı güncelle
 func _process(_delta: float) -> void:
@@ -58,12 +94,41 @@ func _process(_delta: float) -> void:
 	if stickman_node:
 		var pos = stickman_node.global_position
 		var r = 50.0  # Tıklanabilir alan yarıçapı
-		DisplayServer.window_set_mouse_passthrough(PackedVector2Array([
-			Vector2(pos.x - r, pos.y - 60),
-			Vector2(pos.x + r, pos.y - 60),
-			Vector2(pos.x + r, pos.y + 35),
-			Vector2(pos.x - r, pos.y + 35),
-		]))
+		
+		var poly = PackedVector2Array()
+		# Çöp adamın dikdörtgeni
+		var s_rect = Rect2(pos.x - r, pos.y - 60, r * 2.0, 95.0)
+		var base_point = s_rect.position
+		
+		# Önce çöp adamın 4 köşesini ekle
+		poly.append(base_point)
+		poly.append(Vector2(s_rect.end.x, s_rect.position.y))
+		poly.append(Vector2(s_rect.end.x, s_rect.end.y))
+		poly.append(Vector2(s_rect.position.x, s_rect.end.y))
+		poly.append(base_point) # Kapalı döngü
+		
+		# Görünmezlik Sorunu Çözümü: Windows'ta passthrough polygon'u render alanını keser.
+		# Tüm blokları tek bir "polygon" içinde göstermek için aralarına 0 piksel kalınlığında (görünmez) 
+		# köprü çizgileri çekerek birleştiriyoruz!
+		var bloklar = get_tree().get_nodes_in_group("bloklar")
+		for blok in bloklar:
+			var b_pos = blok.global_position
+			var b_rect = Rect2(b_pos.x - 20, b_pos.y - 20, 40.0, 40.0)
+			
+			# Köprü (gidiş)
+			poly.append(base_point)
+			poly.append(b_rect.position)
+			
+			# Bloğun 4 köşesi
+			poly.append(Vector2(b_rect.end.x, b_rect.position.y))
+			poly.append(Vector2(b_rect.end.x, b_rect.end.y))
+			poly.append(Vector2(b_rect.position.x, b_rect.end.y))
+			poly.append(b_rect.position)
+			
+			# Köprü (dönüş)
+			poly.append(base_point)
+			
+		DisplayServer.window_set_mouse_passthrough(poly)
 # Fonksiyonu şimdi tanımlıyoruz
 func haritayükle(dosyayolu: String) -> void:
 
@@ -81,6 +146,7 @@ func haritayükle(dosyayolu: String) -> void:
 	print("harita okundu ikon sayısı:", veri["icons"].size())
 	
 	var ikonliste = veri["icons"]
+	ikon_verileri = ikonliste  # Navigasyon sistemi için sakla
 	
 	for ikon in ikonliste:
 		# Geçersiz veya dosya yolu olmayanları atlama
@@ -105,3 +171,117 @@ func haritayükle(dosyayolu: String) -> void:
 		
 		zemin.add_child(carpisma_alani)
 		add_child(zemin)
+
+# ============================================================
+# AI NAVİGASYON DÖNGÜSÜ
+# ============================================================
+
+func _yeni_hedef_sec() -> void:
+	var stickman = get_node_or_null("Stickman")
+	if not stickman or not nav:
+		return
+		
+	var hedef = nav.rastgele_hedef_sec()
+	if hedef.is_empty():
+		print("Gidilecek ikon bulunamadı!")
+		hedef_zamanlayici.wait_time = 2.0
+		hedef_zamanlayici.start()
+		return
+		
+	print("Yeni hedef: ", hedef["isim"])
+	var rota = nav.yol_bul(stickman.global_position, hedef["isim"])
+	
+	if rota.size() > 0:
+		# A* rota buldu, normal yürü/zıpla
+		stickman.rotayi_ayarla(rota)
+	else:
+		# A* rota bulamadı → İNŞAAT MODU
+		# Hedefin pozisyonunu al, inşaat moduna geç
+		var hedef_pos = nav.hedef_pozisyon_bul(hedef["isim"])
+		if hedef_pos != Vector2.ZERO:
+			stickman.insaat_baslat(hedef["isim"], hedef_pos)
+		else:
+			hedef_zamanlayici.wait_time = 1.0
+			hedef_zamanlayici.start()
+
+func _hedefe_varildi() -> void:
+	print("Hedefe ulaşıldı! Bekleniyor...")
+	hedef_zamanlayici.wait_time = HEDEF_BEKLEME_SURESI
+	hedef_zamanlayici.start()
+
+# ============================================================
+# MANUEL HEDEFLEME (Sürükle & Bırak)
+# ============================================================
+
+func _input(event: InputEvent) -> void:
+	var stickman = get_node_or_null("Stickman")
+	if not stickman:
+		return
+
+	# Fare Tıklaması
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			# Stickman'e tıklandı mı? (50 piksel yakınlık)
+			if event.position.distance_to(stickman.global_position) < 50.0:
+				surukleniyor = true
+				fare_pozisyonu = event.position
+				hedef_zamanlayici.stop()  # Rastgele dolaşmayı durdur
+				print("Manuel hedefleme başladı...")
+		else:
+			if surukleniyor:
+				surukleniyor = false
+				_manuel_hedef_belirle(event.position)
+				queue_redraw()
+
+	# Fare Hareketi
+	elif event is InputEventMouseMotion and surukleniyor:
+		fare_pozisyonu = event.position
+		queue_redraw()  # Çizgiyi güncelle
+
+func _draw() -> void:
+	# Sürüklenirken hedefe nişan alma çizgisi çiz
+	if surukleniyor:
+		var stickman = get_node_or_null("Stickman")
+		if stickman:
+			# Kesik/noktalı çizgi efekti veya düz kırmızı çizgi
+			draw_line(stickman.global_position, fare_pozisyonu, Color(1.0, 0.2, 0.2, 0.8), 4.0)
+			draw_circle(fare_pozisyonu, 10.0, Color(1.0, 0.2, 0.2, 0.8))
+
+func _manuel_hedef_belirle(birakma_noktasi: Vector2) -> void:
+	if not nav: return
+	var stickman = get_node_or_null("Stickman")
+	if not stickman: return
+
+	# Bırakılan noktaya en yakın platformu bul
+	var en_yakin_isim = ""
+	var min_mesafe = 999999.0
+	
+	for id in nav.platformlar:
+		var p = nav.platformlar[id]
+		# Görev çubuğunu da seçebilsin
+		var mesafe = birakma_noktasi.distance_to(p["pozisyon"])
+		if mesafe < min_mesafe:
+			min_mesafe = mesafe
+			en_yakin_isim = p["isim"]
+			
+	if en_yakin_isim != "":
+		print("Manuel hedef: ", en_yakin_isim)
+		var rota = nav.yol_bul(stickman.global_position, en_yakin_isim)
+		if rota.size() > 0:
+			stickman.rotayi_ayarla(rota)
+		else:
+			# Ulaşım yoksa nerd-poling moduna gir
+			var hedef_pos = nav.hedef_pozisyon_bul(en_yakin_isim)
+			if hedef_pos != Vector2.ZERO:
+				stickman.insaat_baslat(en_yakin_isim, hedef_pos)
+
+# ============================================================
+# İNŞAAT (BUILDER) SİSTEMİ
+# ============================================================
+
+func _blok_yerlestir(pozisyon: Vector2) -> void:
+	var blok = KiritasBlok.new()
+	blok.position = pozisyon
+	# Bloğu sahneye ekliyoruz
+	add_child(blok)
+	print("Kırıktaş yerleştirildi: ", pozisyon)

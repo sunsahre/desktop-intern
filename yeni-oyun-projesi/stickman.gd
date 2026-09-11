@@ -6,7 +6,7 @@ extends CharacterBody2D
 
 # --- HAREKET VE FİZİK AYARLARI ---
 @export var SPEED: float = 300.0
-@export var JUMP_VELOCITY: float = -600.0
+@export var JUMP_VELOCITY: float = -300.0
 @export var GRAVITY_SCALE: float = 1.0
 @export var OYUNCU_KONTROLU: bool = true # Klavye ile test etmek için Inspector'dan kapatıp açabilirsin
 
@@ -14,8 +14,27 @@ extends CharacterBody2D
 var move_direction: int = 0   # -1 = sol, 0 = dur, 1 = sağ
 var should_jump: bool = false
 
+# --- ROTA TAKİP SİSTEMİ (A* Navigasyon) ---
+var hedef_rota: Array = []       # Gidilecek waypoint listesi [Vector2, ...]
+var hedefe_vardim: bool = true   # Rota tamamlandı mı?
+signal rota_tamamlandi            # Hedefe ulaşınca sinyal gönder
+
+# --- TIRMANMA MEKANİĞİ ---
+const CLIMB_SPEED: float = 150.0   # Tırmanma hızı
+const MAX_CLIMB_TIME: float = 0.8  # Kaç saniye aralıksız tırmanabilir
+var climb_timer: float = 0.0       # Tırmanmaya harcanan süre
+
+# --- İNŞAAT (BUILDER) MODU ---
+var insaat_modu: bool = false
+var insaat_hedefi: Vector2 = Vector2.ZERO
+var insaat_asamasi: int = 0  # 0=zıplamaya hazır, 1=yükseliyor, 2=iniyor, 3=engelden kaçıyor
+var insaat_kacis_yonu: int = 0 # 1=sağ, -1=sol
+var blok_bekleme: float = 0.0  # Bloklar arası bekleme süresi
+const BLOK_BEKLEME_SURESI: float = 0.8  # Her blok arasında 0.8 sn bekle
+signal blok_koy(pozisyon: Vector2) # Sahne.gd'ye blok koyması için sinyal gönderir
+
 # --- DURUM (STATE) MAKİNESİ ---
-enum State { IDLE, WALK, JUMP, FALL }
+enum State { IDLE, WALK, JUMP, FALL, CLIMB, BUILD }
 var current_state: State = State.IDLE
 var facing_right: bool = true
 
@@ -32,9 +51,18 @@ var gravity: float = ProjectSettings.get_setting("physics/2d/default_gravity")
 var anim_time: float = 0.0
 var breath_time: float = 0.0
 
+var tepe_sensoru: RayCast2D
+
 # ============================================================
 # 1. TEMEL DÖNGÜLER (FİZİK VE KONTROL)
 # ============================================================
+
+func _ready() -> void:
+	# Kafayı çarpma durumlarını önceden tespit etmek için yukarı bakan sensör
+	tepe_sensoru = RayCast2D.new()
+	tepe_sensoru.target_position = Vector2(0, -120) # 120 piksel yukarıya bak
+	tepe_sensoru.position = Vector2(0, -35) # Sensör kafadan başlasın
+	add_child(tepe_sensoru)
 
 func _process(delta: float) -> void:
 	# Görsel animasyonların zamanlayıcılarını güncelliyoruz
@@ -46,16 +74,48 @@ func _process(delta: float) -> void:
 		_klavye_dinle()
 
 func _physics_process(delta: float) -> void:
-	# --- YERÇEKİMİ UYGULAMASI ---
-	if not is_on_floor():
-		velocity.y += gravity * GRAVITY_SCALE * delta
+	# --- DİKEY HAREKET & TIRMANMA ---
+	var tirmandimi = false
 	
-	# --- ZIPLAMA KONTROLÜ ---
-	if should_jump and is_on_floor():
-		velocity.y = JUMP_VELOCITY
-		should_jump = false # Zıpladıktan sonra tetikleyiciyi sıfırla
+	# Blok bekleme süresini azalt
+	if blok_bekleme > 0:
+		blok_bekleme -= delta
+	
+	if is_on_floor():
+		climb_timer = 0.0  # Yere basınca tırmanma enerjisini sıfırla
+		
+		if should_jump:
+			velocity.y = JUMP_VELOCITY
+			should_jump = false
+	else:
+		# Havadayız. Duvara dayandık mı?
+		if is_on_wall() and move_direction != 0:
+			# Tırmanma enerjisi var mı?
+			if climb_timer < MAX_CLIMB_TIME:
+				velocity.y = -CLIMB_SPEED  # Yukarı tırman!
+				climb_timer += delta
+				tirmandimi = true
+				current_state = State.CLIMB
+			else:
+				# ENERJİ BİTTİ! Düşmeden önce ayaklarının altına blok koy!
+				if blok_bekleme <= 0:
+					var blok_yeri = Vector2(global_position.x, global_position.y + 35)
+					blok_koy.emit(blok_yeri)
+					blok_bekleme = BLOK_BEKLEME_SURESI
+					climb_timer = 0.0  # Enerjiyi sıfırla (bloğun üstünde durabilsin)
+					print("Tırmanma enerjisi bitti! Blok konuldu!")
+		
+		# Tırmanmıyorsa normal yerçekimi uygula
+		if not tirmandimi:
+			velocity.y += gravity * GRAVITY_SCALE * delta
+	
+	should_jump = false # Güvenlik için zıplama tetikleyicisini sıfırla
 	
 	# --- YATAY HAREKET ---
+	# Eğer oyuncu kontrolü kapalıysa rota takip sistemi çalışır
+	if not OYUNCU_KONTROLU:
+		rota_takip_et()
+	
 	velocity.x = move_direction * SPEED
 	
 	# --- YÜZÜNÜ DÖNME ---
@@ -113,6 +173,10 @@ func _draw() -> void:
 			_draw_jump(dir)
 		State.FALL:
 			_draw_fall(dir)
+		State.CLIMB:
+			_draw_climb(dir)
+		State.BUILD:
+			_draw_build(dir)
 
 func _draw_idle(dir: float) -> void:
 	var nefes: float = sin(breath_time * 2.0) * 1.5
@@ -293,7 +357,86 @@ func _draw_fall(dir: float) -> void:
 	draw_circle(kafa_merkez + Vector2(3.0 * dir, -2), 2.5, eye_color)
 	
 	draw_circle(kafa_merkez + Vector2(2.0 * dir, 4), 3.0, outline_color)
-	draw_circle(kafa_merkez + Vector2(2.0 * dir, 4), 2.0, body_color)
+	draw_circle(kafa_merkez + Vector2(2.0 * dir, 4), 1.5, Color.BLACK)
+
+
+func _draw_climb(dir: float) -> void:
+	var offset: float = sin(Time.get_ticks_msec() / 100.0) * 2.0  # Tırmanma titremesi
+	
+	var govde_alt: Vector2 = Vector2(5.0 * dir, 10 + offset)
+	var govde_ust: Vector2 = Vector2(8.0 * dir, -15 + offset)
+	var omuz: Vector2 = Vector2(7.0 * dir, -12 + offset)
+	
+	# Gövde
+	draw_line(govde_alt, govde_ust, outline_color, line_width)
+	
+	# Bacaklar (Duvara yapışık ve ayrık)
+	var sol_diz: Vector2 = Vector2(-2.0 * dir, 20 + offset)
+	var sol_ayak: Vector2 = Vector2(5.0 * dir, 30 + offset)
+	var sag_diz: Vector2 = Vector2(10.0 * dir, 18 - offset)
+	var sag_ayak: Vector2 = Vector2(8.0 * dir, 28 - offset)
+	
+	draw_line(govde_alt, sol_diz, outline_color, line_width)
+	draw_line(sol_diz, sol_ayak, outline_color, line_width)
+	draw_line(govde_alt, sag_diz, outline_color, line_width)
+	draw_line(sag_diz, sag_ayak, outline_color, line_width)
+	
+	# Kollar (Duvarı tutuyor)
+	var sol_dirsek: Vector2 = Vector2(-2.0 * dir, -20 + offset)
+	var sol_el: Vector2 = Vector2(10.0 * dir, -25 + offset)
+	var sag_dirsek: Vector2 = Vector2(15.0 * dir, -20 - offset)
+	var sag_el: Vector2 = Vector2(12.0 * dir, -30 - offset)
+	
+	draw_line(omuz, sol_dirsek, outline_color, line_width)
+	draw_line(sol_dirsek, sol_el, outline_color, line_width)
+	draw_line(omuz, sag_dirsek, outline_color, line_width)
+	draw_line(sag_dirsek, sag_el, outline_color, line_width)
+	
+	# Kafa (Duvara bakıyor)
+	var kafa_merkez: Vector2 = Vector2(10.0 * dir, -25 + offset)
+	draw_circle(kafa_merkez, 12.0, outline_color)
+	draw_circle(kafa_merkez, 10.0, body_color)
+	draw_circle(kafa_merkez + Vector2(4.0 * dir, -3), 2.0, eye_color)
+
+func _draw_build(dir: float) -> void:
+	var offset: float = sin(Time.get_ticks_msec() / 100.0) * 1.5
+	
+	var govde_alt: Vector2 = Vector2(0, 10)
+	var govde_ust: Vector2 = Vector2(0, -15)
+	var omuz: Vector2 = Vector2(0, -12)
+	
+	draw_line(govde_alt, govde_ust, outline_color, line_width)
+	
+	var sol_diz: Vector2 = Vector2(-8, 25)
+	var sol_ayak: Vector2 = Vector2(-10, 35)
+	var sag_diz: Vector2 = Vector2(8, 25)
+	var sag_ayak: Vector2 = Vector2(10, 35)
+	
+	draw_line(govde_alt, sol_diz, outline_color, line_width)
+	draw_line(sol_diz, sol_ayak, outline_color, line_width)
+	draw_line(govde_alt, sag_diz, outline_color, line_width)
+	draw_line(sag_diz, sag_ayak, outline_color, line_width)
+	
+	# Kollar yukarıda, havada blok tutuyor gibi!
+	var sol_dirsek: Vector2 = Vector2(-15, -25 + offset)
+	var sol_el: Vector2 = Vector2(-5, -40 + offset)
+	var sag_dirsek: Vector2 = Vector2(15, -25 + offset)
+	var sag_el: Vector2 = Vector2(5, -40 + offset)
+	
+	draw_line(omuz, sol_dirsek, outline_color, line_width)
+	draw_line(sol_dirsek, sol_el, outline_color, line_width)
+	draw_line(omuz, sag_dirsek, outline_color, line_width)
+	draw_line(sag_dirsek, sag_el, outline_color, line_width)
+	
+	# Kafa yukarı bakıyor
+	var kafa_merkez: Vector2 = Vector2(0, -28 + offset)
+	draw_circle(kafa_merkez, 12.0, outline_color)
+	draw_circle(kafa_merkez, 10.0, body_color)
+	draw_circle(kafa_merkez + Vector2(0, -5), 2.0, eye_color)
+	
+	# Elinde tuttuğu küçük gri kırıktaş önizlemesi
+	draw_rect(Rect2(-10, -50 + offset, 20, 20), Color(0.5, 0.5, 0.5))
+	draw_rect(Rect2(-10, -50 + offset, 20, 20), Color(0.2, 0.2, 0.2), false, 1.0)
 
 # ============================================================
 # 4. AI (YAPAY ZEKA) KONTROL ARAYÜZÜ
@@ -327,5 +470,182 @@ func get_status() -> Dictionary:
 		"state": State.keys()[current_state],
 		"velocity_x": velocity.x,
 		"velocity_y": velocity.y,
-		"facing_right": facing_right
+		"facing_right": facing_right,
+		"hedefe_vardim": hedefe_vardim
 	}
+
+# ============================================================
+# 5. ROTA VE İNŞAAT SİSTEMİ v2
+# ============================================================
+
+# Sıkışma algılama
+var _son_pozisyon: Vector2 = Vector2.ZERO
+var _sikisma_sayaci: float = 0.0
+const SIKISMA_SURESI: float = 2.0  # 2 sn hareket etmediyse sıkışmış
+
+func rotayi_ayarla(yeni_rota: Array) -> void:
+	insaat_modu = false
+	hedef_rota = yeni_rota.duplicate()
+	hedefe_vardim = false
+	_sikisma_sayaci = 0.0
+	_son_pozisyon = global_position
+	print("Rota: ", hedef_rota.size(), " waypoint")
+
+func insaat_baslat(hedef_isim: String, hedef_pozisyon: Vector2) -> void:
+	print("İNŞAAT: ", hedef_isim, " hedefine kule dikiliyor!")
+	insaat_modu = true
+	hedefe_vardim = false
+	hedef_rota.clear()
+	insaat_hedefi = hedef_pozisyon
+	insaat_asamasi = 0  # İlk aşamadan başla
+	_sikisma_sayaci = 0.0
+	_son_pozisyon = global_position
+
+func rota_takip_et() -> void:
+	var delta = get_physics_process_delta_time()
+	
+	# --- SIKIŞMA ALGILAMA ---
+	if global_position.distance_to(_son_pozisyon) < 5.0:
+		_sikisma_sayaci += delta
+	else:
+		_sikisma_sayaci = 0.0
+		_son_pozisyon = global_position
+	
+	if _sikisma_sayaci > SIKISMA_SURESI:
+		print("SIKIŞMA ALGILANDI! Waypoint atlanıyor...")
+		_sikisma_sayaci = 0.0
+		if insaat_modu:
+			# İnşaat modunda sıkışırsa vazgeç
+			insaat_modu = false
+			hedefe_vardim = true
+			ai_stop()
+			rota_tamamlandi.emit()
+			return
+		elif not hedef_rota.is_empty():
+			hedef_rota.pop_front()  # Bu waypoint'i atla
+			if hedef_rota.is_empty():
+				hedefe_vardim = true
+				ai_stop()
+				rota_tamamlandi.emit()
+				return
+	
+	# --- İNŞAAT MODU ---
+	if insaat_modu:
+		_insaat_yap()
+		return
+	
+	# --- NORMAL ROTA TAKİBİ ---
+	if hedef_rota.is_empty():
+		if not hedefe_vardim:
+			hedefe_vardim = true
+			ai_stop()
+			rota_tamamlandi.emit()
+		return
+	
+	var hedef = hedef_rota[0] as Vector2
+	var dx = hedef.x - global_position.x
+	var dy = hedef.y - global_position.y
+	
+	# Hedefe vardık mı?
+	if abs(dx) < 30.0 and abs(dy) < 60.0:
+		hedef_rota.pop_front()
+		if hedef_rota.is_empty():
+			ai_stop()
+			hedefe_vardim = true
+			rota_tamamlandi.emit()
+		return
+	
+	# ===== YÜKSEKLİK KONTROLÜ =====
+	# Bu waypoint zıplayarak ulaşılamayacak kadar yüksekte mi?
+	# max zıplama ~183px, güvenli sınır ~150px
+	if dy < -150.0 and abs(dx) < 80.0 and is_on_floor():
+		# Zıplayarak yetişemeyiz → İNŞAAT MODUNA GEÇ!
+		print("Waypoint çok yüksek! İnşaat moduna geçiliyor...")
+		insaat_hedefi = hedef
+		insaat_modu = true
+		insaat_asamasi = 0
+		hedef_rota.pop_front()  # Bu waypoint'i rotadan çıkar (inşaat halledecek)
+		return
+	
+	# Yatay hareket — hedefe doğru yürü
+	ai_move_to_target(hedef.x)
+	
+	# Zıplama kararı
+	if is_on_floor():
+		if dy < -30.0 and abs(dx) < 100.0:
+			ai_jump()
+		elif is_on_wall() and abs(dx) > 10.0:
+			ai_jump()
+
+
+func _insaat_yap() -> void:
+	var dx = insaat_hedefi.x - global_position.x
+	var dy = insaat_hedefi.y - global_position.y
+	
+	# === AŞAMA 3: Engelden Kaçış ===
+	if insaat_asamasi == 3:
+		tepe_sensoru.force_raycast_update()
+		# Eğer tepemiz boşaldıysa ve yere bastıysak kaçış biter
+		if not tepe_sensoru.is_colliding() and is_on_floor():
+			ai_stop()
+			insaat_asamasi = 0
+			insaat_hedefi.x = global_position.x # Geri dönmeye çalışmaması için X'i güncelle
+			print("İnşaat: Açık alan bulundu, kuleye devam!")
+		else:
+			# Hala tepemiz doluysa veya havadaysak, kaçış yönüne yürümeye devam et
+			# Eğer duvara çarptıysak yön değiştir
+			if is_on_wall():
+				insaat_kacis_yonu *= -1
+			move_direction = insaat_kacis_yonu # ai_move_direction yok, değişkeni direkt ayarlıyoruz
+		return
+
+	# ADIM 1: Hedefin X konumuna yürü (Sadece aşama 0'dayken ve kaçmıyorken)
+	if abs(dx) > 30.0 and insaat_asamasi == 0:
+		ai_move_to_target(insaat_hedefi.x)
+		return
+	
+	ai_stop()
+	
+	# Yeterince yükseldik mi? (hedef seviyesindeysek bitir)
+	if dy >= -50.0:
+		insaat_modu = false
+		hedefe_vardim = true
+		ai_stop()
+		rota_tamamlandi.emit()
+		print("İNŞAAT TAMAMLANDI!")
+		return
+	
+	# NERD-POLING DÖNGÜSÜ (Minecraft tarzı)
+	match insaat_asamasi:
+		0:  # === AŞAMA 0: Zıplamaya hazır (yerdeyiz) ===
+			if is_on_floor():
+				tepe_sensoru.force_raycast_update()
+				if tepe_sensoru.is_colliding():
+					print("İnşaat: Tepemde engel var! Yana kayıyorum...")
+					insaat_asamasi = 3 # Kaçış aşaması
+					insaat_kacis_yonu = 1 if randf() > 0.5 else -1
+				else:
+					current_state = State.BUILD
+					ai_jump()
+					insaat_asamasi = 1
+					print("İnşaat: Zıplıyorum!")
+		
+		1:  # === AŞAMA 1: Yükseliyoruz, tepe noktasını bekle ===
+			# Kafamızı çarptıysak hemen kaçışa geç
+			if is_on_ceiling():
+				print("İnşaat: Kafamı çarptım! Kaçış moduna geçiliyor.")
+				insaat_asamasi = 3
+				insaat_kacis_yonu = 1 if randf() > 0.5 else -1
+				return
+				
+			# velocity.y negatifken yükseliyoruz, 0'a yaklaştığında tepe noktasındayız
+			if velocity.y > -80.0:
+				var blok_yeri = Vector2(global_position.x, global_position.y + 55)
+				blok_koy.emit(blok_yeri)
+				insaat_asamasi = 2
+				print("İnşaat: Blok koyuldu! y=", snapped(blok_yeri.y, 1))
+		
+		2:  # === AŞAMA 2: İniyoruz, bloğun üstüne inmeyi bekle ===
+			if is_on_floor():
+				insaat_asamasi = 0  # Yeni döngü başlat
+				print("İnşaat: Bloğa indim! y=", snapped(global_position.y, 1))

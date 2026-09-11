@@ -6,16 +6,17 @@ Kurulum:
     pip install pywinauto pywin32
 
 Calistirma:
-    python harita_cikar.py
+    python test.py
 
 Cikti:
     harita.json dosyasi olusturur ve konsola ozet basar.
 """
-
 import ctypes
 import json
 import os
 import sys
+import win32gui
+from pywinauto.application import Application
 
 # --- 1) DPI awareness: yanlis koordinat almamak icin sart ---
 try:
@@ -41,36 +42,34 @@ def get_screen_size():
 def find_desktop_listview():
     """
     Masaustu hiyerarsisi: Progman -> SHELLDLL_DefView -> SysListView32
-    Bazi sistemlerde WorkerW altinda da olabilir, ikisini de deniyoruz.
+    Bazi sistemlerde WorkerW altinda da olabilir.
+    Doğrudan HWND (pencere kimliği) ile arıyoruz ki oyundayken odaktan çıkınca hata vermesin.
     """
-    desktop = Desktop(backend="uia")
+    # 1. Progman (Klasik Masaüstü)
+    progman = win32gui.FindWindow("Progman", None)
+    shelldll = win32gui.FindWindowEx(progman, 0, "SHELLDLL_DefView", None)
+    listview = win32gui.FindWindowEx(shelldll, 0, "SysListView32", None)
+    
+    if listview:
+        app = Application(backend="uia").connect(handle=listview)
+        return app.window(handle=listview)
 
-    candidates = []
-    # Progman altinda ara
-    try:
-        progman = desktop.window(class_name="Progman")
-        candidates.append(progman.child_window(class_name="SysListView32", control_type="List"))
-    except Exception:
-        pass
-
-    # WorkerW altinda ara (bazi Windows surumlerinde ikonlar burada render edilir)
-    try:
-        for w in desktop.windows(class_name="WorkerW"):
-            try:
-                lv = w.child_window(class_name="SysListView32", control_type="List")
-                if lv.exists():
-                    candidates.append(lv)
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    for c in candidates:
-        try:
-            if c.exists():
-                return c
-        except Exception:
-            continue
+    # 2. WorkerW (Windows 10/11 - Arkaplan vs değişince)
+    results = []
+    def enum_cb(hwnd, ctx):
+        if win32gui.GetClassName(hwnd) == "WorkerW":
+            shell = win32gui.FindWindowEx(hwnd, 0, "SHELLDLL_DefView", None)
+            if shell:
+                lv = win32gui.FindWindowEx(shell, 0, "SysListView32", None)
+                if lv:
+                    results.append(lv)
+    
+    win32gui.EnumWindows(enum_cb, None)
+    
+    if results:
+        listview = results[0]
+        app = Application(backend="uia").connect(handle=listview)
+        return app.window(handle=listview)
 
     return None
 
@@ -203,7 +202,14 @@ def main():
         "icons": icons,
     }
 
-    with open("harita.json", "w", encoding="utf-8") as f:
+    # harita.json dosyasını DOĞRUDAN Godot projesi klasörüne kaydet!
+    # Böylece Godot güncel halini okuyabilir.
+    cikis_yolu = os.path.join(os.path.dirname(__file__), "yeni-oyun-projesi", "harita.json")
+    
+    # "yeni-oyun-projesi" klasörü yoksa hata vermemesi için oluşturalım
+    os.makedirs(os.path.dirname(cikis_yolu), exist_ok=True)
+    
+    with open(cikis_yolu, "w", encoding="utf-8") as f:
         json.dump(harita, f, ensure_ascii=False, indent=2)
 
     print(f"\nharita.json olusturuldu. Toplam {len(icons)} ikon kaydedildi.")
