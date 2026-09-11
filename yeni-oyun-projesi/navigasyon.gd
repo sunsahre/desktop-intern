@@ -12,7 +12,7 @@ var platformlar: Dictionary = {}
 var platform_sayaci: int = 0
 
 # Fizik sabitleri (stickman.gd ile eşleşmeli)
-const ZIPLAMA_HIZI := 600.0
+const ZIPLAMA_HIZI := 287.0
 const YERCEKIMI := 980.0
 const YURUME_HIZI := 300.0
 

@@ -4,7 +4,10 @@ extends Node2D
 var nav: Navigasyon = null
 var ikon_verileri: Array = []  # harita.json'dan okunan ikon listesi
 var hedef_zamanlayici: Timer = null
-const HEDEF_BEKLEME_SURESI := 3.0  # Hedefe varınca kaç sn bekle
+const HEDEF_BEKLEME_SURESI = 5.0  # Hedefe varınca kaç sn bekle
+
+# Modlar
+@export var otomatik_mod: bool = true # True=Kendi gezer, False=Fareyle komut bekler
 
 # --- MANUEL HEDEFLEME (Sürükle & Bırak) ---
 var surukleniyor: bool = false
@@ -95,40 +98,60 @@ func _process(_delta: float) -> void:
 		var pos = stickman_node.global_position
 		var r = 50.0  # Tıklanabilir alan yarıçapı
 		
-		var poly = PackedVector2Array()
-		# Çöp adamın dikdörtgeni
+		var raw_polys: Array[PackedVector2Array] = []
+		
+		# 1. Çöp adamın poligonu
 		var s_rect = Rect2(pos.x - r, pos.y - 60, r * 2.0, 95.0)
-		var base_point = s_rect.position
+		raw_polys.append(PackedVector2Array([
+			s_rect.position,
+			Vector2(s_rect.end.x, s_rect.position.y),
+			s_rect.end,
+			Vector2(s_rect.position.x, s_rect.end.y)
+		]))
 		
-		# Önce çöp adamın 4 köşesini ekle
-		poly.append(base_point)
-		poly.append(Vector2(s_rect.end.x, s_rect.position.y))
-		poly.append(Vector2(s_rect.end.x, s_rect.end.y))
-		poly.append(Vector2(s_rect.position.x, s_rect.end.y))
-		poly.append(base_point) # Kapalı döngü
-		
-		# Görünmezlik Sorunu Çözümü: Windows'ta passthrough polygon'u render alanını keser.
-		# Tüm blokları tek bir "polygon" içinde göstermek için aralarına 0 piksel kalınlığında (görünmez) 
-		# köprü çizgileri çekerek birleştiriyoruz!
+		# 2. Blokların poligonları
 		var bloklar = get_tree().get_nodes_in_group("bloklar")
 		for blok in bloklar:
 			var b_pos = blok.global_position
 			var b_rect = Rect2(b_pos.x - 20, b_pos.y - 20, 40.0, 40.0)
-			
-			# Köprü (gidiş)
-			poly.append(base_point)
-			poly.append(b_rect.position)
-			
-			# Bloğun 4 köşesi
-			poly.append(Vector2(b_rect.end.x, b_rect.position.y))
-			poly.append(Vector2(b_rect.end.x, b_rect.end.y))
-			poly.append(Vector2(b_rect.position.x, b_rect.end.y))
-			poly.append(b_rect.position)
-			
-			# Köprü (dönüş)
-			poly.append(base_point)
-			
-		DisplayServer.window_set_mouse_passthrough(poly)
+			raw_polys.append(PackedVector2Array([
+				b_rect.position,
+				Vector2(b_rect.end.x, b_rect.position.y),
+				b_rect.end,
+				Vector2(b_rect.position.x, b_rect.end.y)
+			]))
+		
+		# 3. Kesişen poligonları birleştir (Geometry2D ile)
+		var merged_polys: Array[PackedVector2Array] = []
+		for p in raw_polys:
+			if merged_polys.is_empty():
+				merged_polys.append(p)
+			else:
+				var new_merged: Array[PackedVector2Array] = []
+				var to_merge = p
+				for mp in merged_polys:
+					var union_res = Geometry2D.merge_polygons(to_merge, mp)
+					if union_res.size() == 1:
+						to_merge = union_res[0] # Kesiştiler, birleştiler!
+					else:
+						new_merged.append(mp) # Kesişmediler
+				new_merged.append(to_merge)
+				merged_polys = new_merged
+				
+		# 4. Ayrık poligonları 0 piksellik görünmez çizgilerle tek poligona bağla
+		var final_poly = PackedVector2Array()
+		if merged_polys.size() > 0:
+			final_poly.append_array(merged_polys[0])
+			var base_point = merged_polys[0][0]
+			for i in range(1, merged_polys.size()):
+				var next_poly = merged_polys[i]
+				final_poly.append(base_point)
+				final_poly.append(next_poly[0])
+				final_poly.append_array(next_poly)
+				final_poly.append(next_poly[0])
+				final_poly.append(base_point)
+				
+		DisplayServer.window_set_mouse_passthrough(final_poly)
 # Fonksiyonu şimdi tanımlıyoruz
 func haritayükle(dosyayolu: String) -> void:
 
@@ -177,6 +200,10 @@ func haritayükle(dosyayolu: String) -> void:
 # ============================================================
 
 func _yeni_hedef_sec() -> void:
+	if not otomatik_mod:
+		print("Otomatik mod KAPALI. Manuel komut bekleniyor...")
+		return
+		
 	var stickman = get_node_or_null("Stickman")
 	if not stickman or not nav:
 		return
@@ -206,8 +233,9 @@ func _yeni_hedef_sec() -> void:
 
 func _hedefe_varildi() -> void:
 	print("Hedefe ulaşıldı! Bekleniyor...")
-	hedef_zamanlayici.wait_time = HEDEF_BEKLEME_SURESI
-	hedef_zamanlayici.start()
+	if otomatik_mod:
+		hedef_zamanlayici.wait_time = HEDEF_BEKLEME_SURESI
+		hedef_zamanlayici.start()
 
 # ============================================================
 # MANUEL HEDEFLEME (Sürükle & Bırak)
@@ -218,6 +246,20 @@ func _input(event: InputEvent) -> void:
 	if not stickman:
 		return
 
+	# "M" tuşuna basarak modu değiştir
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_M:
+			otomatik_mod = not otomatik_mod
+			print("--- MOD DEĞİŞTİ ---")
+			if otomatik_mod:
+				print("OTOMATİK HEDEF MODU: AÇIK")
+				_yeni_hedef_sec()
+			else:
+				print("MANUEL MOD: AÇIK (Sürükle-bırak bekleniyor)")
+				stickman.ai_stop()
+				stickman.hedef_rota.clear()
+				hedef_zamanlayici.stop()
+				
 	# Fare Tıklaması
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
 		if event.pressed:
@@ -226,7 +268,8 @@ func _input(event: InputEvent) -> void:
 				surukleniyor = true
 				fare_pozisyonu = event.position
 				hedef_zamanlayici.stop()  # Rastgele dolaşmayı durdur
-				print("Manuel hedefleme başladı...")
+				otomatik_mod = false      # Elle sürüklenince otomatik modu kapat
+				print("Manuel hedefleme başladı... (Otomatik mod Kapatıldı)")
 		else:
 			if surukleniyor:
 				surukleniyor = false

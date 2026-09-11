@@ -6,7 +6,7 @@ extends CharacterBody2D
 
 # --- HAREKET VE FİZİK AYARLARI ---
 @export var SPEED: float = 300.0
-@export var JUMP_VELOCITY: float = -300.0
+@export var JUMP_VELOCITY: float = -287.0 # Zıplama tam 42 piksel yüksekliğinde (40px blok için 2px pay)
 @export var GRAVITY_SCALE: float = 1.0
 @export var OYUNCU_KONTROLU: bool = true # Klavye ile test etmek için Inspector'dan kapatıp açabilirsin
 
@@ -82,7 +82,9 @@ func _physics_process(delta: float) -> void:
 		blok_bekleme -= delta
 	
 	if is_on_floor():
-		climb_timer = 0.0  # Yere basınca tırmanma enerjisini sıfırla
+		# Tırmanma enerjisi aniden dolmasın, 2 saniyede yavaşça dolsun (0.8 / 2 = 0.4 hızla azalır)
+		if climb_timer > 0.0:
+			climb_timer = max(0.0, climb_timer - delta * (MAX_CLIMB_TIME / 2.0))
 		
 		if should_jump:
 			velocity.y = JUMP_VELOCITY
@@ -99,11 +101,12 @@ func _physics_process(delta: float) -> void:
 			else:
 				# ENERJİ BİTTİ! Düşmeden önce ayaklarının altına blok koy!
 				if blok_bekleme <= 0:
-					var blok_yeri = Vector2(global_position.x, global_position.y + 35)
-					blok_koy.emit(blok_yeri)
-					blok_bekleme = BLOK_BEKLEME_SURESI
-					climb_timer = 0.0  # Enerjiyi sıfırla (bloğun üstünde durabilsin)
-					print("Tırmanma enerjisi bitti! Blok konuldu!")
+					var blok_yeri = Vector2(global_position.x, global_position.y + 35 + 20)
+					if _blok_sigar_mi(blok_yeri):
+						blok_koy.emit(blok_yeri)
+						blok_bekleme = BLOK_BEKLEME_SURESI
+						# Eskiden enerjiyi anında sıfırlıyorduk, artık yavaşça dolacak.
+						print("Tırmanma enerjisi bitti! Blok konuldu, dinleniyor...")
 		
 		# Tırmanmıyorsa normal yerçekimi uygula
 		if not tirmandimi:
@@ -462,6 +465,20 @@ func ai_move_to_target(target_x: float) -> void:
 	else:
 		ai_move_left()
 
+func _blok_sigar_mi(pos: Vector2) -> bool:
+	var space_state = get_world_2d().direct_space_state
+	var query = PhysicsShapeQueryParameters2D.new()
+	var rect = RectangleShape2D.new()
+	rect.size = Vector2(38, 38) # 40x40 bloğun biraz içinden kontrol et ki sürtünmeleri hata saymasın
+	query.shape = rect
+	query.transform = Transform2D(0, pos)
+	
+	# Çöp adamın kendisini yoksay
+	query.exclude = [self.get_rid()]
+	
+	var sonuc = space_state.intersect_shape(query)
+	return sonuc.is_empty()
+
 func get_status() -> Dictionary:
 	return {
 		"x": global_position.x,
@@ -638,12 +655,20 @@ func _insaat_yap() -> void:
 				insaat_kacis_yonu = 1 if randf() > 0.5 else -1
 				return
 				
-			# velocity.y negatifken yükseliyoruz, 0'a yaklaştığında tepe noktasındayız
-			if velocity.y > -80.0:
-				var blok_yeri = Vector2(global_position.x, global_position.y + 55)
-				blok_koy.emit(blok_yeri)
-				insaat_asamasi = 2
-				print("İnşaat: Blok koyuldu! y=", snapped(blok_yeri.y, 1))
+			# Sürekli olarak tam ayaklarımızın altını (hedef X'te) kontrol et
+			var ayak_y = global_position.y + 35
+			var blok_merkez = Vector2(insaat_hedefi.x, ayak_y + 20)
+			
+			# Havadayken (velocity.y > -150) kontrol etmeye başla, sığdığı an koy!
+			if velocity.y > -150.0:
+				if _blok_sigar_mi(blok_merkez):
+					blok_koy.emit(blok_merkez)
+					insaat_asamasi = 2
+					print("İnşaat: Blok tam sığdı ve koyuldu! y=", snapped(blok_merkez.y, 1))
+				elif velocity.y >= 0.0 and is_on_floor():
+					# Zıpladık, düşüşe geçtik ama blok koyacak boşluk bulamadık ve yere indik.
+					# Demek ki sıkıştık veya yeterince zıplayamadık. Tekrar dene.
+					insaat_asamasi = 0
 		
 		2:  # === AŞAMA 2: İniyoruz, bloğun üstüne inmeyi bekle ===
 			if is_on_floor():
