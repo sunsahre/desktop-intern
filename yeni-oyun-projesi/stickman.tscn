@@ -4,12 +4,12 @@
 
 [sub_resource type="CapsuleShape2D" id="CapsuleShape2D_1"]
 radius = 20.0
-height = 72.0
+height = 96.0
 
 [node name="Stickman" type="CharacterBody2D" unique_id=2123915130]
 collision_layer = 2
 script = ExtResource("1_stk")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1358594883]
-position = Vector2(0, -5)
+position = Vector2(0, -17)
 shape = SubResource("CapsuleShape2D_1")

@@ -15,7 +15,7 @@ const IKON_KATMANI = 3  # İkonlar ve bloklar: tek yönlü platform katmanı (st
 # --- MOUSE İLE TUTMA & FIRLATMA (sol tık) ---
 var tutulmus: bool = false                    # Stickman tutulmuş mu?
 var fare_pozisyonu: Vector2 = Vector2.ZERO    # Güncel fare pozisyonu
-const TUTMA_YARICAPI = 50.0
+const TUTMA_YARICAPI = 62.0
 const FIRLATMA_SONRASI_BEKLEME = 1.0          # Kendine geldikten sonra AI'ın yeniden başlaması
 
 # --- TIKLAMA GEÇİRME ALANI ---
@@ -30,6 +30,13 @@ const SON_HEDEF_HAFIZA = 3                     # Kaç hedef hatırla
 
 # --- MANUEL HEDEFLEME (sağ tık sürükle & bırak) ---
 var surukleniyor: bool = false
+
+# --- KOMUT PANELİ ("," ile aç/kapat) ---
+const KomutPaneliSahnesi = preload("res://komut_paneli.gd")
+var komut_paneli: PanelContainer
+var _bekleyen_komut: Dictionary = {}          # {isim, yol, ac}: tutulup fırlatılsa da sonra devam eder
+var _bekleyen_deneme: int = 0
+const BEKLEYEN_MAX_DENEME = 8
 
 func _ready() -> void:
 	
@@ -53,14 +60,7 @@ func _ready() -> void:
 	DisplayServer.window_set_mouse_passthrough(PackedVector2Array())
 	# ------------------------------------
 
-	# Masaüstü ikonlarını güncelle (Python scriptini çalıştır)
-	print("Masaüstü ikonları taranıyor... Lütfen bekleyin.")
-	var python_yolu = ProjectSettings.globalize_path("res://../.venv/Scripts/python.exe")
-	var script_yolu = ProjectSettings.globalize_path("res://../test.py")
-	OS.execute(python_yolu, [script_yolu])
-	print("Tarama tamamlandı!")
-	
-	# Haritayı (JSON) yükle
+	_masaustunu_tara()
 	haritayükle("res://harita.json")
 	
 	# --- GÖREV ÇUBUĞU (ZEMİN) OLUŞTURMA ---
@@ -110,6 +110,29 @@ func _ready() -> void:
 		add_child(hedef_zamanlayici)
 		hedef_zamanlayici.start()
 		print("AI navigasyon aktif!")
+	
+	# --- KOMUT PANELİ ---
+	var arayuz = CanvasLayer.new()
+	arayuz.layer = 10
+	add_child(arayuz)
+	komut_paneli = KomutPaneliSahnesi.new()
+	arayuz.add_child(komut_paneli)
+	komut_paneli.hedefleri_ayarla(nav.hedefler())
+	komut_paneli.otomatik_ayarla(otomatik_mod)
+	komut_paneli.komut_secildi.connect(_komut_calistir)
+	komut_paneli.visibility_changed.connect(_gecis_alanini_yenile)
+	komut_paneli.resized.connect(_gecis_alanini_yenile)
+
+func _masaustunu_tara() -> void:
+	# Masaüstü ikonlarını güncelle (Python scriptini çalıştır)
+	print("Masaüstü ikonları taranıyor... Lütfen bekleyin.")
+	var python_yolu = ProjectSettings.globalize_path("res://../.venv/Scripts/python.exe")
+	var script_yolu = ProjectSettings.globalize_path("res://../test.py")
+	OS.execute(python_yolu, [script_yolu])
+	print("Tarama tamamlandı!")
+
+func _gecis_alanini_yenile() -> void:
+	_son_blok_sayisi = -1  # Bir sonraki karede tıklanabilir alanı zorla yeniden kur
 
 # Her frame'de stickman etrafındaki tıklanabilir alanı güncelle
 func _process(_delta: float) -> void:
@@ -158,6 +181,16 @@ func _gecis_alanini_guncelle(pos: Vector2, bloklar: Array) -> void:
 			Vector2(b_rect.end.x, b_rect.position.y),
 			b_rect.end,
 			Vector2(b_rect.position.x, b_rect.end.y)
+		]))
+	
+	# Komut paneli açıksa tıklanabilir olmalı
+	if komut_paneli and komut_paneli.visible:
+		var p_rect: Rect2 = komut_paneli.get_global_rect()
+		raw_polys.append(PackedVector2Array([
+			p_rect.position,
+			Vector2(p_rect.end.x, p_rect.position.y),
+			p_rect.end,
+			Vector2(p_rect.position.x, p_rect.end.y)
 		]))
 	
 	# 3. Kesişen poligonları birleştir (Geometry2D ile)
@@ -238,6 +271,7 @@ func haritayükle(dosyayolu: String) -> void:
 		zemin.set_meta("hedef_dosya", ikon["path"])
 		
 		zemin.add_child(carpisma_alani)
+		KiritasBlok.ragdoll_govdesi_ekle(zemin, kutugeo.size)
 		add_child(zemin)
 
 # ============================================================
@@ -305,12 +339,24 @@ func _aylak_dolasmaya_basla(stickman) -> void:
 		hedef_zamanlayici.start()
 
 func _firlatmadan_kurtuldu() -> void:
-	if otomatik_mod and not tutulmus:
+	if tutulmus:
+		return
+	if not _bekleyen_komut.is_empty():
+		_bekleyen_deneme = 0
+		_bekleyen_komutu_baslat()
+	elif otomatik_mod:
 		hedef_zamanlayici.wait_time = FIRLATMA_SONRASI_BEKLEME
 		hedef_zamanlayici.start()
 
-func _hedefe_varildi() -> void:
-	print("Hedefe ulaşıldı! Bekleniyor...")
+func _hedefe_varildi(basarili: bool) -> void:
+	var stickman = get_node_or_null("Stickman")
+	if not _bekleyen_komut.is_empty() and stickman and stickman.hedef_isim == _bekleyen_komut["isim"]:
+		if basarili:
+			_bekleyen_komutu_bitir()
+		else:
+			komut_paneli.durum_yaz("%s hedefine ulaşamadı." % _bekleyen_komut["isim"])
+			_bekleyen_komut = {}
+	print("Hedefe ulaşıldı! Bekleniyor..." if basarili else "Hedeften vazgeçildi.")
 	if otomatik_mod:
 		var bekleme = randf_range(HEDEF_BEKLEME_SURESI_MIN, HEDEF_BEKLEME_SURESI_MAX)
 		hedef_zamanlayici.wait_time = bekleme
@@ -320,23 +366,31 @@ func _hedefe_varildi() -> void:
 # MANUEL HEDEFLEME (Sürükle & Bırak)
 # ============================================================
 
+# Tuşlar arama kutusuna yazarken tetiklenmesin diye arayüzden sonra işlenir
+func _unhandled_input(event: InputEvent) -> void:
+	if not (event is InputEventKey and event.pressed and not event.echo):
+		return
+	if event.keycode == KEY_COMMA or event.unicode == 44:
+		_paneli_ac_kapat()
+		get_viewport().set_input_as_handled()
+	elif event.keycode == KEY_M:
+		_otomatik_modu_degistir()
+
 func _input(event: InputEvent) -> void:
 	var stickman = get_node_or_null("Stickman")
 	if not stickman:
 		return
-
-	# "M" tuşuna basarak modu değiştir
-	if event is InputEventKey and event.pressed and not event.echo:
-		if event.keycode == KEY_M:
-			otomatik_mod = not otomatik_mod
-			print("--- MOD DEĞİŞTİ ---")
-			if otomatik_mod:
-				print("OTOMATİK HEDEF MODU: AÇIK")
-				_yeni_hedef_sec()
-			else:
-				print("MANUEL MOD: AÇIK (Sürükle-bırak bekleniyor)")
-				stickman.plani_iptal()
-				hedef_zamanlayici.stop()
+	
+	# Paneldeki tıklamalar arayüze gitsin, stickman'i tutmasın
+	if event is InputEventMouse and komut_paneli and komut_paneli.visible \
+			and komut_paneli.get_global_rect().has_point(event.position) and not tutulmus and not surukleniyor:
+		return
+	
+	# Paneli aç/kapat (pencere odakta olmasa da stickman'e orta tık çalışır)
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_MIDDLE and event.pressed:
+		if event.position.distance_to(stickman.global_position) < TUTMA_YARICAPI:
+			_paneli_ac_kapat()
+		return
 				
 	# Sol tık: tut, savur, bırakınca fırlat
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
@@ -357,6 +411,8 @@ func _input(event: InputEvent) -> void:
 				fare_pozisyonu = event.position
 				hedef_zamanlayici.stop()  # Rastgele dolaşmayı durdur
 				otomatik_mod = false      # Elle sürüklenince otomatik modu kapat
+				_bekleyen_komut = {}
+				komut_paneli.otomatik_ayarla(false)
 				print("Manuel hedefleme başladı... (Otomatik mod Kapatıldı)")
 		else:
 			if surukleniyor:
@@ -399,6 +455,131 @@ func _manuel_hedef_belirle(birakma_noktasi: Vector2) -> void:
 	if en_yakin_isim != "":
 		print("Manuel hedef: ", en_yakin_isim)
 		stickman.hedefe_git(en_yakin_isim)
+
+# ============================================================
+# KOMUT PANELİ
+# ============================================================
+
+func _paneli_ac_kapat() -> void:
+	if komut_paneli.visible:
+		komut_paneli.visible = false
+		return
+	var stickman = get_node_or_null("Stickman")
+	var konum := Vector2(100, 100)
+	if stickman:
+		# Stickman'in sağ üstünde açılır (ekrana sığmazsa içeri kaydırılır)
+		konum = stickman.global_position + Vector2(70, -380)
+	komut_paneli.ac(konum)
+
+func _otomatik_modu_degistir() -> void:
+	var stickman = get_node_or_null("Stickman")
+	otomatik_mod = not otomatik_mod
+	komut_paneli.otomatik_ayarla(otomatik_mod)
+	print("--- MOD DEĞİŞTİ ---")
+	if otomatik_mod:
+		print("OTOMATİK HEDEF MODU: AÇIK")
+		komut_paneli.durum_yaz("Rastgele geziyor.")
+		if _bekleyen_komut.is_empty():
+			_yeni_hedef_sec()
+	else:
+		print("MANUEL MOD: AÇIK (Sürükle-bırak bekleniyor)")
+		komut_paneli.durum_yaz("Rastgele gezme kapalı.")
+		if _bekleyen_komut.is_empty() and stickman:
+			stickman.plani_iptal()
+		hedef_zamanlayici.stop()
+
+func _komut_calistir(komut: String, hedef: Dictionary) -> void:
+	var stickman = get_node_or_null("Stickman")
+	if not stickman:
+		return
+	match komut:
+		"git", "git_ac":
+			hedef_zamanlayici.stop()
+			_bekleyen_komut = {"isim": hedef["isim"], "yol": hedef["yol"], "ac": komut == "git_ac"}
+			_bekleyen_deneme = 0
+			_bekleyen_komutu_baslat()
+		"hemen_ac":
+			_dosyayi_ac(hedef["isim"], hedef["yol"])
+		"dur":
+			_bekleyen_komut = {}
+			hedef_zamanlayici.stop()
+			if otomatik_mod:
+				_otomatik_modu_degistir()
+			stickman.plani_iptal()
+			komut_paneli.durum_yaz("Durdu.")
+		"otomatik":
+			_otomatik_modu_degistir()
+		"gorev_cubugu":
+			hedef_zamanlayici.stop()
+			_bekleyen_komut = {"isim": "gorev_cubugu", "yol": "", "ac": false}
+			_bekleyen_deneme = 0
+			_bekleyen_komutu_baslat()
+		"zipla":
+			stickman.ai_jump()
+		"bloklari_temizle":
+			for blok in get_tree().get_nodes_in_group("bloklar"):
+				blok.queue_free()
+			komut_paneli.durum_yaz("Bloklar temizlendi.")
+		"yenile":
+			_masaustunu_yenile()
+
+func _bekleyen_komutu_baslat() -> void:
+	if _bekleyen_komut.is_empty():
+		return
+	var stickman = get_node_or_null("Stickman")
+	var isim: String = _bekleyen_komut["isim"]
+	var sonra: String = " (varınca açacak)" if _bekleyen_komut["ac"] else ""
+	if stickman.is_grabbed or stickman.is_thrown:
+		komut_paneli.durum_yaz("Kendine gelince %s hedefine gidecek%s." % [isim, sonra])
+		return
+	if stickman.hedefe_git(isim):
+		komut_paneli.durum_yaz("%s hedefine gidiyor%s." % [isim, sonra])
+	elif _hedefte_mi(stickman, isim):
+		_bekleyen_komutu_bitir()
+	elif _bekleyen_deneme < BEKLEYEN_MAX_DENEME:
+		# Havadaysa ya da tırmanıyorsa yere basınca tekrar dene
+		_bekleyen_deneme += 1
+		get_tree().create_timer(0.5).timeout.connect(_bekleyen_komutu_baslat)
+	else:
+		komut_paneli.durum_yaz("%s hedefine yol bulunamadı." % isim)
+		_bekleyen_komut = {}
+
+func _hedefte_mi(stickman, isim: String) -> bool:
+	var s: Dictionary = nav.yuzey_bul(isim)
+	if s.is_empty():
+		return false
+	var ayak: Vector2 = stickman._ayak()
+	return ayak.x >= s["x0"] - 60.0 and ayak.x <= s["x1"] + 60.0 \
+			and ayak.y >= s["y"] - 10.0 and ayak.y <= s["y"] + s["h"] + 60.0
+
+func _bekleyen_komutu_bitir() -> void:
+	var komut := _bekleyen_komut
+	_bekleyen_komut = {}
+	if komut["ac"]:
+		_dosyayi_ac(komut["isim"], komut["yol"])
+	else:
+		komut_paneli.durum_yaz("%s hedefine vardı." % komut["isim"])
+
+func _dosyayi_ac(isim: String, yol: String) -> void:
+	var hata := OS.shell_open(yol)
+	if hata == OK:
+		komut_paneli.durum_yaz("%s açıldı." % isim)
+	else:
+		komut_paneli.durum_yaz("%s açılamadı (hata %d)." % [isim, hata])
+	print("Dosya aç: ", yol, " -> ", hata)
+
+func _masaustunu_yenile() -> void:
+	var stickman = get_node_or_null("Stickman")
+	if stickman:
+		stickman.plani_iptal()
+	_bekleyen_komut = {}
+	for ikon in get_tree().get_nodes_in_group("ikonlar"):
+		ikon.queue_free()
+	_masaustunu_tara()
+	haritayükle("res://harita.json")
+	nav.grafi_kur(ikon_verileri, DisplayServer.screen_get_size())
+	komut_paneli.hedefleri_ayarla(nav.hedefler())
+	komut_paneli.durum_yaz("Masaüstü yenilendi: %d hedef." % nav.hedefler().size())
 
 # ============================================================
 # İNŞAAT (BUILDER) SİSTEMİ

@@ -1,2 +1,4 @@
 .venv
 harita.json
+# Minecraft dokuları (Mojang'a ait, yerel kurulumdan çıkarılır, dağıtılmaz)
+yeni-oyun-projesi/mc_doku/

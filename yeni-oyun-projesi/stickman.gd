@@ -15,7 +15,7 @@ var move_direction: int = 0   # -1 = sol, 0 = dur, 1 = sağ
 var should_jump: bool = false
 
 # --- PLAN YÜRÜTÜCÜ (navigasyon.gd plan_yap çıktısı) ---
-signal rota_tamamlandi            # Hedefe ulaşınca (ya da vazgeçince) sinyal gönder
+signal rota_tamamlandi(basarili: bool)  # Hedefe ulaşınca true, vazgeçince false
 var nav: Navigasyon = null        # Sahne atar
 var plan: Array = []              # Adım listesi: YURU, ZIPLA, TIRMAN, DUS_IC, DUS_KENAR, KULE, KOPRU
 var hedef_isim: String = ""
@@ -52,10 +52,10 @@ var current_state: State = State.IDLE
 var facing_right: bool = true
 
 # --- ÇİZİM VE KOZMETİK AYARLAR (Animation vs Minecraft Turuncu Stickman) ---
-var body_color: Color = Color(1.0, 0.53, 0.0)    # Turuncu dolgu
-var outline_color: Color = Color(0.8, 0.4, 0.0)  # Koyu turuncu çerçeve
-var eye_color: Color = Color.BLACK
-var line_width: float = 5.0  # Kalın çizgiler (AvM tarzı)
+var outline_color: Color = Color(1.0, 0.43, 0.0)  # The Second Coming turuncusu
+var line_width: float = 4.0  # Kalın çizgiler (AvM tarzı)
+const BOYUT: float = 1.25
+const CIZIM_TABANI: Vector2 = Vector2(0, 29.0)  # Çizimde ayak tabanı; büyütme bu noktaya göre
 
 # Yerçekimini proje ayarlarından dinamik çekiyoruz
 var gravity: float = ProjectSettings.get_setting("physics/2d/default_gravity")
@@ -67,22 +67,39 @@ var breath_time: float = 0.0
 # --- MOUSE İLE TUTMA / FIRLATMA ---
 signal yakalandi
 signal yere_indi                     # Fırlatıldıktan sonra yere inip kendine geldi
-const TUTMA_NOKTASI: Vector2 = Vector2(0, -38)  # Kafanın tepesinden tutulur
+const TUTMA_NOKTASI: Vector2 = Vector2(0, -64)  # Kafanın tepesinden tutulur
 const TUTMA_TAKIP: float = 30.0      # Fareye ne kadar sıkı yapışsın (büyük = daha sıkı)
 const FIRLATMA_CARPANI: float = 1.2
 const MAX_FIRLATMA_HIZI: float = 2200.0
-const SEKME_KATSAYISI: float = 0.45  # Çarpınca hızın ne kadarı korunur
-const SERSEMLEME_SURESI: float = 0.8
 var is_grabbed: bool = false         # Şu an tutulmuş mu?
-var is_thrown: bool = false          # Fırlatılmış mı? (yere düşene kadar)
+var is_thrown: bool = false          # Ragdoll'da mı? (fırlatılma, yerde yatma, kalkma)
 var fare_hizi: Vector2 = Vector2.ZERO
 var _onceki_fare: Vector2 = Vector2.ZERO
-var _onceki_fare_hizi: Vector2 = Vector2.ZERO
-var sallanma_aci: float = 0.0        # Tutulunca sarkaç açısı
-var sallanma_hizi: float = 0.0
-var donme_aci: float = 0.0           # Havada dönme açısı
-var donme_hizi: float = 0.0
-var sersem_suresi: float = 0.0
+
+# --- RAGDOLL (tutulma / fırlatılma) ---
+# Nokta sırası: kafa, omuz, kalça, arka dirsek, arka el, ön dirsek, ön el, arka diz, arka ayak, ön diz, ön ayak
+enum { R_KAFA, R_OMUZ, R_KALCA, R_DIRSEK_A, R_EL_A, R_DIRSEK_B, R_EL_B, R_DIZ_A, R_AYAK_A, R_DIZ_B, R_AYAK_B }
+const R_SEKME: float = 0.25          # Çarpınca normal hızın ne kadarı geri seker
+const R_SURTUNME: float = 0.15       # Yere sürtünürken kare başı teğet hız kaybı
+const R_STATIK_SURTUNME: float = 0.8 # Bundan yavaş kayan temas noktası (px/kare) durur
+const R_SEKME_ESIGI: float = 4.0     # Bundan yavaş (px/kare) çarpmalar sekmez, yerde titremesin
+const R_HAVA_SONUMU: float = 0.995
+const R_ITERASYON: int = 8
+const YERDE_MIN: float = 1.2         # Durduktan sonra en az bu kadar yatar
+const YERDE_MAX: float = 3.5
+const KALKIS_DIZ: float = 0.6        # Yerden dizine doğrulma süresi
+const KALKIS_AYAK: float = 0.5       # Dizden ayağa kalkma süresi
+var r_nokta: PackedVector2Array = PackedVector2Array()
+var r_onceki: PackedVector2Array = PackedVector2Array()
+var r_temas: PackedByteArray = PackedByteArray()
+var r_normal: PackedVector2Array = PackedVector2Array()
+var _r_cubuklar: Array = []          # [a, b, uzunluk, min_mi]
+var _r_sakin_sure: float = 0.0
+var _r_ucus_sure: float = 0.0
+var _r_max_darbe: float = 0.0
+var _yerde_sure: float = 0.0
+var _kalkis_sure: float = -1.0
+var _kalkis_baslangic: PackedVector2Array = PackedVector2Array()
 
 # --- İVMELİ HAREKET ---
 const ZEMIN_IVME: float = 1600.0
@@ -113,12 +130,6 @@ func _process(delta: float) -> void:
 	anim_time += delta
 	breath_time += delta
 	
-	# Yere inince dönme açısını yumuşakça sıfırla
-	if not is_grabbed and not is_thrown and donme_aci != 0.0:
-		donme_aci = lerp_angle(donme_aci, 0.0, minf(1.0, 12.0 * delta))
-		if absf(donme_aci) < 0.01:
-			donme_aci = 0.0
-	
 	# Doğal hız değişimi (smooth interpolation)
 	_hiz_guncelle(delta)
 	
@@ -137,11 +148,6 @@ func _physics_process(delta: float) -> void:
 		queue_redraw()
 		return
 	
-	if sersem_suresi > 0.0:
-		sersem_suresi -= delta
-		if sersem_suresi <= 0.0:
-			yere_indi.emit()
-	
 	var tirmandimi = false
 	
 	if blok_bekleme > 0:
@@ -150,7 +156,7 @@ func _physics_process(delta: float) -> void:
 		insaat_anim -= delta
 	
 	# --- KARAR (yürütücü move_direction / should_jump / tirmaniyor ayarlar) ---
-	if not OYUNCU_KONTROLU and sersem_suresi <= 0.0:
+	if not OYUNCU_KONTROLU:
 		if duraksadi:
 			duraklama_suresi -= delta
 			if duraklama_suresi <= 0:
@@ -196,9 +202,6 @@ func _physics_process(delta: float) -> void:
 	
 	should_jump = false
 	
-	if sersem_suresi > 0.0:
-		move_direction = 0
-	
 	# Hıza anında değil, ivmeyle ulaş (ani başla/dur robotikliğini önler)
 	var hedef_hiz: float = move_direction * SPEED * hiz_carpani
 	var ivme: float = ZEMIN_IVME
@@ -217,7 +220,8 @@ func _physics_process(delta: float) -> void:
 	
 	if is_on_floor():
 		hava_suresi = 0.0
-		walk_phase += absf(velocity.x) / SPEED * 9.0 * delta
+		# Döngü hızı = yer hızı / adım boyu: basan ayak yere göre sabit kalır, kaymaz
+		walk_phase += absf(velocity.x) / _adim_boyu(_hiz_orani()) * delta
 	else:
 		hava_suresi += delta
 	if tirmandimi:
@@ -271,9 +275,11 @@ func _hiz_guncelle(delta: float) -> void:
 # --- MOUSE İLE TUTMA/FIRLATMA API ---
 func yakala() -> void:
 	"""Sahne.gd tarafından çağrılır — stickman'ı yakala."""
+	if not is_thrown:
+		_ragdoll_kur()
 	is_grabbed = true
 	is_thrown = false
-	sersem_suresi = 0.0
+	_kalkis_sure = -1.0
 	velocity = Vector2.ZERO
 	move_direction = 0
 	should_jump = false
@@ -281,13 +287,17 @@ func yakala() -> void:
 	current_state = State.GRABBED
 	_onceki_fare = get_global_mouse_position()
 	fare_hizi = Vector2.ZERO
-	_onceki_fare_hizi = Vector2.ZERO
-	sallanma_aci = 0.0
-	sallanma_hizi = 0.0
-	donme_aci = 0.0
-	donme_hizi = 0.0
+	# Kafa ilk karede fareye ışınlanırsa gövde yukarı fırlar; bütün ragdoll'u kaydır
+	var kayma: Vector2 = _tutma_pini(_onceki_fare) - r_nokta[R_KAFA]
+	for i in r_nokta.size():
+		r_nokta[i] += kayma
+		r_onceki[i] += kayma
+	global_position = _onceki_fare - TUTMA_NOKTASI
 	plani_iptal()
 	yakalandi.emit()
+
+func _tutma_pini(fare: Vector2) -> Vector2:
+	return fare + Vector2(0.0, (KAFA_RY + line_width * 0.5) * BOYUT)
 
 func birak() -> void:
 	"""Fare bırakılınca çağrılır — farenin son hızıyla fırlatır."""
@@ -295,12 +305,19 @@ func birak() -> void:
 		return
 	is_grabbed = false
 	is_thrown = true
-	velocity = (fare_hizi * FIRLATMA_CARPANI).limit_length(MAX_FIRLATMA_HIZI)
-	# Pivot etrafındaki sarkaç dönüşünü merkez etrafındaki dönüşe çevir (görsel sıçrama olmasın)
-	move_and_collide(TUTMA_NOKTASI - TUTMA_NOKTASI.rotated(sallanma_aci))
-	donme_aci = sallanma_aci
-	donme_hizi = sallanma_hizi
 	current_state = State.THROWN
+	_r_sakin_sure = 0.0
+	_r_ucus_sure = 0.0
+	_r_max_darbe = 0.0
+	_yerde_sure = -1.0
+	_kalkis_sure = -1.0
+	# Kafa elin hızını tam alır, gövde ve uzuvlar geride kalır: fırlatınca kendi etrafında döner
+	var dt: float = 1.0 / Engine.physics_ticks_per_second
+	var atis: Vector2 = (fare_hizi * FIRLATMA_CARPANI).limit_length(MAX_FIRLATMA_HIZI) * dt
+	for i in r_nokta.size():
+		var pay: float = 1.0 if i == R_KAFA else 0.55
+		var v: Vector2 = (r_nokta[i] - r_onceki[i]).lerp(atis, pay).limit_length(MAX_FIRLATMA_HIZI * dt)
+		r_onceki[i] = r_nokta[i] - v
 
 func firlatma_bitti_mi() -> bool:
 	return not is_grabbed and not is_thrown
@@ -310,61 +327,235 @@ func _tutulma_fizigi(delta: float) -> void:
 	var anlik_hiz: Vector2 = (fare - _onceki_fare) / delta
 	_onceki_fare = fare
 	fare_hizi = fare_hizi.lerp(anlik_hiz, 0.4)
-	var fare_ivmesi: Vector2 = (fare_hizi - _onceki_fare_hizi) / delta
-	_onceki_fare_hizi = fare_hizi
 	
-	# Sarkaç: fare hızlanınca gövde geride kalır, sonra yerçekimiyle sallanıp durulur
-	var savrulma: float = clampf(fare_ivmesi.x * 0.012, -250.0, 250.0)
-	sallanma_hizi += (-sin(sallanma_aci) * 16.0 + savrulma * cos(sallanma_aci)) * delta
-	sallanma_hizi *= exp(-2.5 * delta)
-	sallanma_aci = clampf(sallanma_aci + sallanma_hizi * delta, -2.6, 2.6)
-	
-	if absf(fare_hizi.x) > 40.0:
-		facing_right = fare_hizi.x > 0
-	
-	velocity = (fare - TUTMA_NOKTASI - global_position) * TUTMA_TAKIP
-	move_and_slide()
-	velocity = Vector2.ZERO
+	# Kafa fareye sabit; gövde ve uzuvlar ataletle geride kalıp sallanır
+	global_position = fare - TUTMA_NOKTASI
+	_ragdoll_adim(delta, true, _tutma_pini(fare))
 	current_state = State.GRABBED
 
 func _firlatma_fizigi(delta: float) -> void:
-	velocity.y += gravity * GRAVITY_SCALE * delta
-	velocity *= exp(-0.3 * delta)  # Hafif hava direnci
-	donme_hizi = lerpf(donme_hizi, velocity.x * 0.012, minf(1.0, 3.0 * delta))
-	donme_aci += donme_hizi * delta
 	current_state = State.THROWN
+	if _kalkis_sure >= 0.0:
+		_kalkis_yurut(delta)
+		return
 	
-	var carpisma := move_and_collide(velocity * delta)
-	if carpisma:
-		var normal: Vector2 = carpisma.get_normal()
-		if normal.y < -0.7 and absf(velocity.dot(normal)) < 300.0:
-			_yere_kon()
-			return
-		velocity = velocity.bounce(normal) * SEKME_KATSAYISI
-		donme_hizi *= -0.6
+	_ragdoll_adim(delta, false, Vector2.ZERO)
+	global_position = r_nokta[R_KALCA]
+	_r_ucus_sure += delta
 	
-	_ekran_siniri()
+	if _yerde_sure < 0.0:
+		var hareketsiz := true
+		for i in r_nokta.size():
+			if r_nokta[i].distance_to(r_onceki[i]) > 0.35:
+				hareketsiz = false
+				break
+		var temas: int = 0
+		for t in r_temas:
+			temas += t
+		_r_sakin_sure = _r_sakin_sure + delta if hareketsiz and temas >= 2 else 0.0
+		if _r_sakin_sure > 0.35 or _r_ucus_sure > 8.0:
+			# Sert düştükçe daha uzun yerde kalır
+			_yerde_sure = clampf(YERDE_MIN + _r_max_darbe / 1000.0 * 1.2, YERDE_MIN, YERDE_MAX)
+	else:
+		_yerde_sure -= delta
+		if _yerde_sure <= 0.0:
+			_kalkisa_basla()
 
-func _yere_kon() -> void:
-	is_thrown = false
-	velocity.y = 0.0
-	velocity.x *= 0.5
-	donme_aci = wrapf(donme_aci, -PI, PI)
-	donme_hizi = 0.0
-	sersem_suresi = SERSEMLEME_SURESI
-	current_state = State.IDLE
+# --- RAGDOLL FİZİĞİ (Verlet noktaları + mesafe kısıtları + ışınla çarpışma) ---
+func _tasarimdan_dunyaya(v: Vector2) -> Vector2:
+	return global_position + v * BOYUT + CIZIM_TABANI * (1.0 - BOYUT)
 
-func _ekran_siniri() -> void:
+func _ayakta_pozu(d: float) -> Array:
+	return [Vector2(0, OMUZ_Y - BOYUN), Vector2(0.5 * d, OMUZ_Y), Vector2(0, KALCA_Y),
+		Vector2(-5.5 * d, -13.5), Vector2(-8.0 * d, -3.0), Vector2(6.5 * d, -13.5), Vector2(8.5 * d, -3.0),
+		Vector2(-4.0 * d, 10.5), Vector2(-6.0 * d, 27.0), Vector2(3.5 * d, 10.5), Vector2(5.0 * d, 27.0)]
+
+func _diz_pozu(d: float) -> Array:
+	# Arka diz yerde, ön ayak basmış, eller ön dizden destek alıyor
+	return [Vector2(7.0 * d, -16.0), Vector2(3.0 * d, -4.0), Vector2(-1.0 * d, 12.0),
+		Vector2(6.0 * d, 5.0), Vector2(11.0 * d, 12.0), Vector2(9.0 * d, 4.0), Vector2(13.0 * d, 13.0),
+		Vector2(-3.0 * d, 27.0), Vector2(-19.0 * d, 27.0), Vector2(15.0 * d, 9.0), Vector2(15.0 * d, 27.0)]
+
+func _ragdoll_kur() -> void:
+	var dir: float = 1.0 if facing_right else -1.0
+	r_nokta = PackedVector2Array()
+	for v in _ayakta_pozu(dir):
+		r_nokta.append(_tasarimdan_dunyaya(v))
+	r_onceki = r_nokta.duplicate()
+	r_temas = PackedByteArray()
+	r_temas.resize(r_nokta.size())
+	r_normal.resize(r_nokta.size())
+	var s: float = BOYUT
+	var govde: float = KALCA_Y - OMUZ_Y
+	_r_cubuklar = [
+		[R_KAFA, R_OMUZ, BOYUN * s, false],
+		[R_OMUZ, R_KALCA, govde * s, false],
+		[R_KAFA, R_KALCA, (BOYUN + govde) * s, false],  # Omurga bükülmez
+		[R_OMUZ, R_DIRSEK_A, PAZU * s, false], [R_DIRSEK_A, R_EL_A, ONKOL * s, false],
+		[R_OMUZ, R_DIRSEK_B, PAZU * s, false], [R_DIRSEK_B, R_EL_B, ONKOL * s, false],
+		[R_KALCA, R_DIZ_A, UYLUK * s, false], [R_DIZ_A, R_AYAK_A, BALDIR * s, false],
+		[R_KALCA, R_DIZ_B, UYLUK * s, false], [R_DIZ_B, R_AYAK_B, BALDIR * s, false],
+		# Eklem sınırları: dirsek/diz tamamen katlanmaz, uyluk gövdeye yapışmaz, el kafaya girmez
+		[R_OMUZ, R_EL_A, 13.0 * s, true], [R_OMUZ, R_EL_B, 13.0 * s, true],
+		[R_KALCA, R_AYAK_A, 22.0 * s, true], [R_KALCA, R_AYAK_B, 22.0 * s, true],
+		[R_OMUZ, R_DIZ_A, 18.0 * s, true], [R_OMUZ, R_DIZ_B, 18.0 * s, true],
+		[R_KAFA, R_EL_A, 11.0 * s, true], [R_KAFA, R_EL_B, 11.0 * s, true],
+	]
+
+func _r_maske() -> int:
+	# Tek yönlü ikon katmanı yerine onların katı kopyalarını gör
+	return (collision_mask & ~(1 << (IKON_KATMANI - 1))) | (1 << (KiritasBlok.RAGDOLL_KATMANI - 1))
+
+func _r_yaricap(i: int) -> float:
+	if i == R_KAFA:
+		return (KAFA_RY + line_width * 0.5) * BOYUT
+	return line_width * 0.5 * BOYUT + 0.5
+
+func _ragdoll_adim(delta: float, sabit: bool, sabit_nokta: Vector2) -> void:
+	var g := Vector2(0.0, gravity * GRAVITY_SCALE * delta * delta)
+	var baslangic: PackedVector2Array = r_nokta.duplicate()
+	var on_hiz := PackedVector2Array()
+	for i in r_nokta.size():
+		var v: Vector2 = (r_nokta[i] - r_onceki[i]) * R_HAVA_SONUMU + g
+		on_hiz.append(v)
+		r_onceki[i] = r_nokta[i]
+		r_nokta[i] += v
+		r_temas[i] = 0
+		r_normal[i] = Vector2.ZERO
+	if sabit:
+		r_nokta[R_KAFA] = sabit_nokta
+	
+	# Kısıtlar ve çarpışma aynı döngüde konum düzeltmesi olarak çözülür;
+	# ayrı çözülünce yerde yatarken kısıt-çarpışma çekişmesi titreme yaratıyor
+	for _k in R_ITERASYON:
+		for c in _r_cubuklar:
+			_cubuk_coz(c, sabit)
+		if sabit:
+			r_nokta[R_KAFA] = sabit_nokta
+		for i in r_nokta.size():
+			if not (sabit and i == R_KAFA):
+				_carpisma_coz(i, baslangic[i])
+	
+	# Hız tepkisi bir kez: sert çarpmada hafif sekme, yerde kayarken sürtünme
+	for i in r_nokta.size():
+		if not r_temas[i]:
+			continue
+		var n: Vector2 = r_normal[i]
+		var v: Vector2 = r_nokta[i] - r_onceki[i]
+		var vn: float = v.dot(n)
+		var vt: Vector2 = (v - n * vn) * (1.0 - R_SURTUNME)
+		var carpma: float = on_hiz[i].dot(n)
+		if carpma < 0.0:
+			_r_max_darbe = maxf(_r_max_darbe, -carpma / delta)
+			if carpma < -R_SEKME_ESIGI:
+				vn = maxf(vn, -carpma * R_SEKME)
+		r_onceki[i] = r_nokta[i] - (vt + n * vn)
+
+func _cubuk_coz(c: Array, kafa_sabit: bool) -> void:
+	var a: int = c[0]
+	var b: int = c[1]
+	var fark: Vector2 = r_nokta[b] - r_nokta[a]
+	var d: float = fark.length()
+	if d < 0.0001 or (c[3] and d >= c[2]):
+		return
+	# Gövde noktaları uzuvlardan ağır: savrulurken kollar/bacaklar gövdeyi peşinden sürükler
+	var wa: float = _r_hafiflik(a, kafa_sabit)
+	var wb: float = _r_hafiflik(b, kafa_sabit)
+	if wa + wb <= 0.0:
+		return
+	var duzeltme: Vector2 = fark * ((d - c[2]) / d / (wa + wb))
+	r_nokta[a] += duzeltme * wa
+	r_nokta[b] -= duzeltme * wb
+
+func _r_hafiflik(i: int, kafa_sabit: bool) -> float:
+	if i == R_KAFA:
+		return 0.0 if kafa_sabit else 0.8
+	if i == R_OMUZ or i == R_KALCA:
+		return 0.5
+	return 1.0
+
+func _carpisma_coz(i: int, baslangic: Vector2) -> void:
+	var r: float = _r_yaricap(i)
+	var hedef: Vector2 = r_nokta[i]
+	var hareket: Vector2 = hedef - baslangic
+	var uzay := get_world_2d().direct_space_state
+	
+	# Önce hareket yönünde, bulunamazsa aşağı doğru (zemine yaslanma) yarıçap kadar ileri bak
+	var yon: Vector2 = hareket.normalized() if hareket.length() > 0.001 else Vector2.DOWN
+	for uc in [hedef + yon * (r + 0.5), hedef + Vector2(0.0, r + 0.5)]:
+		var sonuc: Dictionary = uzay.intersect_ray(PhysicsRayQueryParameters2D.create(baslangic, uc, _r_maske(), [get_rid()]))
+		if not sonuc.is_empty() and _r_kabul(sonuc, hareket):
+			var n: Vector2 = sonuc["normal"]
+			var p: Vector2 = hedef
+			# Yüzeyin içinden dışarı it
+			var derinlik: float = (sonuc["position"] + n * r - p).dot(n)
+			if derinlik > 0.0:
+				p += n * derinlik
+			# Statik sürtünme: yavaş kayan temas noktası olduğu yere yapışır
+			var kayma: Vector2 = (p - baslangic) - n * (p - baslangic).dot(n)
+			if kayma.length() < R_STATIK_SURTUNME:
+				p -= kayma
+			r_nokta[i] = p
+			r_temas[i] = 1
+			r_normal[i] = n
+			break
+	
 	var ekran: Vector2 = get_viewport_rect().size
-	if global_position.x < 20.0:
-		global_position.x = 20.0
-		velocity.x = absf(velocity.x) * SEKME_KATSAYISI
-	elif global_position.x > ekran.x - 20.0:
-		global_position.x = ekran.x - 20.0
-		velocity.x = -absf(velocity.x) * SEKME_KATSAYISI
-	if global_position.y < 45.0:
-		global_position.y = 45.0
-		velocity.y = absf(velocity.y) * SEKME_KATSAYISI
+	var q: Vector2 = r_nokta[i]
+	var n_ekran := Vector2.ZERO
+	if q.x < r:
+		q.x = r
+		n_ekran = Vector2.RIGHT
+	elif q.x > ekran.x - r:
+		q.x = ekran.x - r
+		n_ekran = Vector2.LEFT
+	if q.y < r:
+		q.y = r
+		n_ekran = Vector2.DOWN
+	elif q.y > ekran.y - r:
+		q.y = ekran.y - r
+		n_ekran = Vector2.UP
+	if n_ekran != Vector2.ZERO:
+		r_nokta[i] = q
+		r_temas[i] = 1
+		r_normal[i] = n_ekran
+
+func _r_kabul(_sonuc: Dictionary, _hareket: Vector2) -> bool:
+	# Yürürken tek yönlü olan ikon ve bloklar savrulurken her yönden katıdır (yanlara da çarpar).
+	# İçlerinde başlayan ışın o şekle çarpmaz, yani ikonun önünde tutulan ragdoll dışarı düşebilir.
+	return true
+
+func _kalkisa_basla() -> void:
+	var kalca: Vector2 = r_nokta[R_KALCA]
+	var sorgu := PhysicsRayQueryParameters2D.create(kalca + Vector2(0, -20), kalca + Vector2(0, 200), _r_maske(), [get_rid()])
+	var sonuc: Dictionary = get_world_2d().direct_space_state.intersect_ray(sorgu)
+	var zemin_y: float = sonuc["position"].y if not sonuc.is_empty() else kalca.y
+	var ekran_x: float = get_viewport_rect().size.x
+	facing_right = r_nokta[R_KAFA].x > kalca.x
+	global_position = Vector2(clampf(kalca.x, 25.0, ekran_x - 25.0), zemin_y - AYAK)
+	_kalkis_baslangic = r_nokta.duplicate()
+	_kalkis_sure = 0.0
+
+func _kalkis_yurut(delta: float) -> void:
+	# Yattığı pozdan önce dizine, sonra ayağa doğrulur
+	_kalkis_sure += delta
+	var dir: float = 1.0 if facing_right else -1.0
+	var diz: Array = _diz_pozu(dir)
+	var ayakta: Array = _ayakta_pozu(dir)
+	for i in r_nokta.size():
+		var diz_p: Vector2 = _tasarimdan_dunyaya(diz[i])
+		if _kalkis_sure < KALKIS_DIZ:
+			r_nokta[i] = _kalkis_baslangic[i].lerp(diz_p, smoothstep(0.0, KALKIS_DIZ, _kalkis_sure))
+		else:
+			var t: float = smoothstep(KALKIS_DIZ, KALKIS_DIZ + KALKIS_AYAK, _kalkis_sure)
+			r_nokta[i] = diz_p.lerp(_tasarimdan_dunyaya(ayakta[i]), t)
+	r_onceki = r_nokta.duplicate()
+	if _kalkis_sure >= KALKIS_DIZ + KALKIS_AYAK:
+		is_thrown = false
+		_kalkis_sure = -1.0
+		velocity = Vector2.ZERO
+		current_state = State.IDLE
+		yere_indi.emit()
 
 # ============================================================
 # 3. ÇÖP ADAM ÇİZİM MOTORU (PROCEDURAL ANIMATION)
@@ -373,10 +564,13 @@ func _ekran_siniri() -> void:
 func _draw() -> void:
 	var dir: float = 1.0 if facing_right else -1.0
 	
-	if current_state == State.GRABBED:
-		draw_set_transform_matrix(Transform2D(sallanma_aci, TUTMA_NOKTASI) * Transform2D(0.0, -TUTMA_NOKTASI))
-	elif donme_aci != 0.0:
-		draw_set_transform(Vector2.ZERO, donme_aci)
+	if is_grabbed or is_thrown:
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2(BOYUT, BOYUT))
+		_draw_ragdoll()
+		return
+	
+	# Pozlar küçük ölçekte tasarlandı; ayak tabanı sabit kalacak şekilde büyütülür
+	draw_set_transform_matrix(Transform2D(0.0, Vector2(BOYUT, BOYUT), 0.0, CIZIM_TABANI * (1.0 - BOYUT)))
 	
 	match current_state:
 		State.IDLE:
@@ -391,57 +585,48 @@ func _draw() -> void:
 			_draw_climb(dir)
 		State.BUILD:
 			_draw_build(dir)
-		State.GRABBED:
-			_draw_grabbed(dir)
-		State.THROWN:
-			_draw_thrown(dir)
 
 func _draw_idle(dir: float) -> void:
-	var nefes: float = sin(breath_time * 2.0) * 1.5
+	var nefes: float = sin(breath_time * 2.0) * 1.0
+	var kol_sallanma: float = sin(breath_time * 1.5) * 1.5
+	var kalca := Vector2(0.0, KALCA_Y + nefes * 0.3)
+	var omuz := Vector2(0.5 * dir, OMUZ_Y + nefes)
 	
-	# BACAKLAR
-	var kalca: Vector2 = Vector2(0, 5 + nefes)
-	var sol_diz: Vector2 = Vector2(-6, 16 + nefes * 0.5)
-	var sol_ayak: Vector2 = Vector2(-8, 27)
-	var sag_diz: Vector2 = Vector2(6, 16 + nefes * 0.5)
-	var sag_ayak: Vector2 = Vector2(8, 27)
-	
-	draw_line(kalca, sol_diz, outline_color, line_width)
-	draw_line(sol_diz, sol_ayak, outline_color, line_width)
-	draw_line(kalca, sag_diz, outline_color, line_width)
-	draw_line(sag_diz, sag_ayak, outline_color, line_width)
-	
-	# GÖVDE
-	var bel: Vector2 = Vector2(0, 5 + nefes)
-	var omuz: Vector2 = Vector2(0, -18 + nefes)
-	draw_line(bel, omuz, outline_color, line_width)
-	
-	# KOLLAR
-	var kol_sallanma: float = sin(breath_time * 1.5) * 3.0
-	var sol_dirsek: Vector2 = Vector2(-10, -8 + nefes + kol_sallanma)
-	var sol_el: Vector2 = Vector2(-12, 2 + nefes + kol_sallanma * 0.5)
-	var sag_dirsek: Vector2 = Vector2(10, -8 + nefes - kol_sallanma)
-	var sag_el: Vector2 = Vector2(12, 2 + nefes - kol_sallanma * 0.5)
-	
-	draw_line(omuz, sol_dirsek, outline_color, line_width)
-	draw_line(sol_dirsek, sol_el, outline_color, line_width)
-	draw_line(omuz, sag_dirsek, outline_color, line_width)
-	draw_line(sag_dirsek, sag_el, outline_color, line_width)
-	
-	# KAFA VE YÜZ (AvM tarzı: turuncu dolgu + koyu çerçeve)
-	var kafa_merkez: Vector2 = Vector2(0, -28 + nefes)
-	draw_circle(kafa_merkez, 12.0, outline_color)  # Koyu çerçeve
-	draw_circle(kafa_merkez, 10.0, body_color)      # Turuncu dolgu
-	draw_circle(kafa_merkez + Vector2(3.0 * dir, -2), 1.8, eye_color) # Göz
-	
-	var agiz_merkez: Vector2 = kafa_merkez + Vector2(2.0 * dir, 3)
-	draw_arc(agiz_merkez, 3.0, 0.2, PI - 0.2, 12, outline_color, 1.5) # Gülümseme
+	# Ağırlık arka bacakta, ön diz hafif bükük (rahat duruş)
+	_uzuv_ciz(kalca, Vector2(-6.0 * dir, 27.0), UYLUK, BALDIR, -dir, outline_color)
+	_uzuv_ciz(kalca, Vector2(5.0 * dir, 27.0), UYLUK, BALDIR, -dir, outline_color)
+	_cizgi(kalca, omuz, outline_color)
+	# Kollar gövdenin iki yanında sarkar, dirsekler hafif dışa
+	_uzuv_ciz(omuz, omuz + Vector2(-8.0 + kol_sallanma * 0.3, 19.0), PAZU, ONKOL, 1.0, outline_color)
+	_uzuv_ciz(omuz, omuz + Vector2(8.0 - kol_sallanma * 0.3, 19.0), PAZU, ONKOL, -1.0, outline_color)
+	_kafa_ciz(omuz + Vector2(0.0, -BOYUN))
+
+# --- ÇİZİM YARDIMCILARI ---
+# Oranlar: uzun bacaklar, kısa gövde, kafa doğrudan gövdeye oturur
+const KAFA_RX: float = 9.5
+const KAFA_RY: float = 10.5
+const BOYUN: float = KAFA_RY + 2.0   # Kafa merkezinin omuzdan uzaklığı (halka gövdeye değer)
+const KALCA_Y: float = -6.0
+const OMUZ_Y: float = -22.0
+
+func _cizgi(a: Vector2, b: Vector2, renk: Color) -> void:
+	draw_line(a, b, renk, line_width)
+	draw_circle(a, line_width * 0.5, renk)
+	draw_circle(b, line_width * 0.5, renk)
+
+func _kafa_ciz(merkez: Vector2, aci: float = 0.0, renk: Color = outline_color) -> void:
+	# AvM tarzı içi boş, hafif oval halka kafa; yüz yok, ifade beden dilinden gelir
+	var noktalar := PackedVector2Array()
+	for i in 41:
+		var t: float = TAU * i / 40.0
+		noktalar.append(merkez + Vector2(cos(t) * KAFA_RX, sin(t) * KAFA_RY).rotated(aci))
+	draw_polyline(noktalar, renk, line_width, true)
 
 # --- IK YARDIMCILARI ---
-const UYLUK: float = 12.5
-const BALDIR: float = 12.5
-const PAZU: float = 10.0
-const ONKOL: float = 10.0
+const UYLUK: float = 17.0
+const BALDIR: float = 17.0
+const PAZU: float = 10.5
+const ONKOL: float = 10.5
 
 func _eklem_bul(kok: Vector2, uc: Vector2, l1: float, l2: float, bukulme: float) -> Vector2:
 	"""İki kemikli zincirde orta eklem (diz/dirsek). bukulme: +1/-1 hangi tarafa kıvrılacağı."""
@@ -459,286 +644,179 @@ func _uzuv_ciz(kok: Vector2, uc: Vector2, l1: float, l2: float, bukulme: float, 
 	var eklem: Vector2 = _eklem_bul(kok, uc, l1, l2, bukulme)
 	draw_line(kok, eklem, renk, line_width)
 	draw_line(eklem, uc, renk, line_width)
+	draw_circle(kok, line_width * 0.5, renk)
 	draw_circle(eklem, line_width * 0.5, renk)
+	draw_circle(uc, line_width * 0.5, renk)
+
+const KOSU_BASLA: float = 0.5   # Bu hız oranından itibaren yürüyüş koşuya karışmaya başlar
+const KOSU_TAM: float = 0.8     # Bu hız oranında tamamen koşu
+
+func _hiz_orani() -> float:
+	return clampf(absf(velocity.x) / SPEED, 0.0, 1.2)
+
+func _kosu_orani(k: float) -> float:
+	return smoothstep(KOSU_BASLA, KOSU_TAM, k)
+
+func _adim_boyu(k: float) -> float:
+	return maxf(10.0, lerpf(15.0 * k, 21.0, _kosu_orani(k)))
+
+func _yurume_pozu(p: float, k: float, dir: float) -> Dictionary:
+	# Gövde: ayaklar alttan geçerken yükselir, çift basışta alçalır; hız arttıkça öne eğilir
+	var bob: float = (1.0 - absf(cos(p))) * 3.0 * k
+	var egilme: float = (2.5 + 2.0 * k) * k * dir
+	var kalca := Vector2(0.0, KALCA_Y + 1.5 - bob)
+	var poz := {"kalca": kalca, "omuz": kalca + Vector2(egilme, OMUZ_Y - KALCA_Y)}
+	poz["kafa"] = poz["omuz"] + Vector2(egilme * 0.4, -BOYUN)
+	
+	# Ayak: yerdeyken geriye kayar, öne giderken havalanır
+	var adim: float = _adim_boyu(k) if k > 0.05 else 0.0
+	var ayaklar: Array = []
+	for faz in [p, p + PI]:
+		ayaklar.append(Vector2(cos(faz) * adim * dir, 27.0 - maxf(0.0, -sin(faz)) * 10.0 * k))
+	poz["ayaklar"] = ayaklar
+	
+	# Kollar bacakların tersine, rahat sallanır
+	var kol_salinim: float = 10.0 * k + 1.0
+	var eller: Array = []
+	for faz in [p + PI, p]:
+		eller.append(poz["omuz"] + Vector2(cos(faz) * kol_salinim * dir + egilme * 0.3, 19.5 - absf(sin(faz)) * 2.5 * k))
+	poz["eller"] = eller
+	return poz
+
+func _kosu_pozu(p: float, dir: float) -> Dictionary:
+	# Alan Becker tarzı koşu: güçlü öne eğilme, iki ayağın havada olduğu uçuş anı,
+	# yükselen ön diz, kalçaya savrulan arka topuk, 90° bükük pompalayan kollar
+	var ucus: float = absf(cos(p)) * 5.0      # Bacaklar açıkken gövde en yüksekte
+	var kalca := Vector2(0.0, KALCA_Y + 2.0 - ucus)
+	var omuz := kalca + Vector2(8.0 * dir, -14.5)
+	var poz := {"kalca": kalca, "omuz": omuz, "kafa": omuz + Vector2(4.5 * dir, -BOYUN + 0.5)}
+	
+	var adim: float = _adim_boyu(1.0)
+	var ayaklar: Array = []
+	for faz in [p, p + PI]:
+		var ileri: float = cos(faz)                  # +1 önde, -1 arkada
+		var havada: float = maxf(0.0, -sin(faz))     # Öne savrulma (salınım) fazı
+		var kaldirma: float = havada * 17.0
+		# Arka bacak salınıma başlarken topuk yukarı, kalçaya doğru savrulur
+		kaldirma += havada * maxf(0.0, -ileri) * 12.0
+		ayaklar.append(Vector2(ileri * adim * dir, 27.0 - kaldirma - ucus))
+	poz["ayaklar"] = ayaklar
+	
+	# Kollar: pazu ileri-geri sallanır, ön kol ~100° bükük kalır ve öne bakar
+	var eller: Array = []
+	for faz in [p + PI, p]:
+		var aci: float = cos(faz) * 1.2 - 0.2
+		var pazu_yon := Vector2(sin(aci) * dir, cos(aci))
+		var dirsek: Vector2 = omuz + pazu_yon * PAZU
+		eller.append(dirsek + pazu_yon.rotated(-deg_to_rad(100.0) * dir) * ONKOL)
+	poz["eller"] = eller
+	return poz
 
 func _draw_walk(dir: float) -> void:
 	var p: float = walk_phase
-	var k: float = clampf(absf(velocity.x) / SPEED, 0.0, 1.2)  # Adım büyüklüğü hıza bağlı
+	var k: float = _hiz_orani()
+	var r: float = _kosu_orani(k)
 	var arka_renk: Color = outline_color.darkened(0.25)
 	
-	# Gövde: ayaklar alttan geçerken yükselir, çift basışta alçalır; hız arttıkça öne eğilir
-	var bob: float = (1.0 - absf(cos(p))) * 2.5 * k
-	var kalca: Vector2 = Vector2(0.0, 6.0 - bob)
-	var egilme: float = (3.0 + 2.0 * k) * k * dir
-	var omuz: Vector2 = Vector2(egilme, -17.0 - bob)
+	var poz: Dictionary = _yurume_pozu(p, k, dir)
+	if r > 0.0:
+		var kosu: Dictionary = _kosu_pozu(p, dir)
+		for anahtar in ["kalca", "omuz", "kafa"]:
+			poz[anahtar] = poz[anahtar].lerp(kosu[anahtar], r)
+		for liste in ["ayaklar", "eller"]:
+			for i in 2:
+				poz[liste][i] = poz[liste][i].lerp(kosu[liste][i], r)
 	
-	# Ayak yörüngesi: yerdeyken geriye kayar, öne giderken havalanır
-	var adim: float = 11.0 * k
-	var kaldirma: float = 8.0 * k
-	var ayaklar: Array = []
-	for faz in [p, p + PI]:
-		var x: float = cos(faz) * adim * dir
-		var y: float = 27.0 - maxf(0.0, -sin(faz)) * kaldirma
-		ayaklar.append(Vector2(x, y))
-	
-	# Kollar bacakların tersine sallanır
-	var kol_salinim: float = 8.0 * k + 1.0
-	var eller: Array = []
-	for faz in [p + PI, p]:
-		eller.append(omuz + Vector2(cos(faz) * kol_salinim * dir + egilme * 0.3, 15.0 - absf(sin(faz)) * 2.0 * k))
+	var kalca: Vector2 = poz["kalca"]
+	var omuz: Vector2 = poz["omuz"]
 	
 	# Arkadaki uzuvlar önce (koyu), öndekiler sonra
-	_uzuv_ciz(kalca, ayaklar[1], UYLUK, BALDIR, -dir, arka_renk)
-	_uzuv_ciz(omuz, eller[1], PAZU, ONKOL, dir, arka_renk)
-	draw_line(kalca, omuz, outline_color, line_width)
-	_uzuv_ciz(kalca, ayaklar[0], UYLUK, BALDIR, -dir, outline_color)
-	_uzuv_ciz(omuz, eller[0], PAZU, ONKOL, dir, outline_color)
+	_uzuv_ciz(kalca, poz["ayaklar"][1], UYLUK, BALDIR, -dir, arka_renk)
+	_uzuv_ciz(omuz, poz["eller"][1], PAZU, ONKOL, dir, arka_renk)
+	_cizgi(kalca, omuz, outline_color)
+	_uzuv_ciz(kalca, poz["ayaklar"][0], UYLUK, BALDIR, -dir, outline_color)
 	
-	# Kafa ve yüz
-	var kafa_merkez: Vector2 = omuz + Vector2(egilme * 0.4, -11.0)
-	draw_circle(kafa_merkez, 12.0, outline_color)
-	draw_circle(kafa_merkez, 10.0, body_color)
-	draw_circle(kafa_merkez + Vector2(4.0 * dir, -2), 1.8, eye_color)
+	_kafa_ciz(poz["kafa"], (omuz - kalca).angle() + PI / 2.0)
 	
-	var agiz_start: Vector2 = kafa_merkez + Vector2(1.0 * dir, 3)
-	var agiz_end: Vector2 = agiz_start + Vector2(4.0 * dir, 0)
-	draw_line(agiz_start, agiz_end, outline_color, 1.5)
+	# Öndeki kol koşarken yüz hizasına kadar kalktığı için kafanın önünde çizilir
+	_uzuv_ciz(omuz, poz["eller"][0], PAZU, ONKOL, dir, outline_color)
 
-func _draw_jump(dir: float) -> void:
-	var kalca: Vector2 = Vector2(0, 5)
-	var sol_diz: Vector2 = Vector2(-10, 12)
-	var sol_ayak: Vector2 = Vector2(-6, 20)
-	var sag_diz: Vector2 = Vector2(10, 12)
-	var sag_ayak: Vector2 = Vector2(6, 20)
-	
-	draw_line(kalca, sol_diz, outline_color, line_width)
-	draw_line(sol_diz, sol_ayak, outline_color, line_width)
-	draw_line(kalca, sag_diz, outline_color, line_width)
-	draw_line(sag_diz, sag_ayak, outline_color, line_width)
-	
-	var omuz: Vector2 = Vector2(0, -20)
-	draw_line(kalca, omuz, outline_color, line_width)
-	
-	var sol_omuz: Vector2 = omuz + Vector2(-3, 2)
-	var sol_dirsek: Vector2 = sol_omuz + Vector2(-10, -8)
-	var sol_el: Vector2 = sol_dirsek + Vector2(-4, -8)
-	draw_line(sol_omuz, sol_dirsek, outline_color, line_width)
-	draw_line(sol_dirsek, sol_el, outline_color, line_width)
-	
-	var sag_omuz: Vector2 = omuz + Vector2(3, 2)
-	var sag_dirsek: Vector2 = sag_omuz + Vector2(10, -8)
-	var sag_el: Vector2 = sag_dirsek + Vector2(4, -8)
-	draw_line(sag_omuz, sag_dirsek, outline_color, line_width)
-	draw_line(sag_dirsek, sag_el, outline_color, line_width)
-	
-	var kafa_merkez: Vector2 = Vector2(0, -30)
-	draw_circle(kafa_merkez, 12.0, outline_color)
-	draw_circle(kafa_merkez, 10.0, body_color)
-	draw_circle(kafa_merkez + Vector2(3.0 * dir, -3), 2.0, eye_color)
-	
-	draw_circle(kafa_merkez + Vector2(2.0 * dir, 4), 2.5, outline_color)
-	draw_circle(kafa_merkez + Vector2(2.0 * dir, 4), 1.5, body_color)
+func _draw_jump(_dir: float) -> void:
+	# Toplanmış zıplama: dizler yukarı, kollar havada
+	var kalca := Vector2(0.0, KALCA_Y)
+	var omuz := Vector2(0.0, OMUZ_Y)
+	_uzuv_ciz(kalca, kalca + Vector2(-7.0, 20.0), UYLUK, BALDIR, 1.0, outline_color)
+	_uzuv_ciz(kalca, kalca + Vector2(7.0, 20.0), UYLUK, BALDIR, -1.0, outline_color)
+	_cizgi(kalca, omuz, outline_color)
+	_uzuv_ciz(omuz, omuz + Vector2(-15.0, -14.0), PAZU, ONKOL, -1.0, outline_color)
+	_uzuv_ciz(omuz, omuz + Vector2(15.0, -14.0), PAZU, ONKOL, 1.0, outline_color)
+	_kafa_ciz(omuz + Vector2(0.0, -BOYUN))
 
-func _draw_fall(dir: float) -> void:
-	var flutter: float = sin(anim_time * 15.0) * 3.0 
-	
-	var kalca: Vector2 = Vector2(0, 5)
-	var sol_diz: Vector2 = Vector2(-12 + flutter, 14)
-	var sol_ayak: Vector2 = Vector2(-15 + flutter * 1.5, 24)
-	var sag_diz: Vector2 = Vector2(12 - flutter, 14)
-	var sag_ayak: Vector2 = Vector2(15 - flutter * 1.5, 24)
-	
-	draw_line(kalca, sol_diz, outline_color, line_width)
-	draw_line(sol_diz, sol_ayak, outline_color, line_width)
-	draw_line(kalca, sag_diz, outline_color, line_width)
-	draw_line(sag_diz, sag_ayak, outline_color, line_width)
-	
-	var omuz: Vector2 = Vector2(0, -18)
-	draw_line(kalca, omuz, outline_color, line_width)
-	
-	var sol_omuz: Vector2 = omuz + Vector2(-3, 2)
-	var sol_dirsek: Vector2 = sol_omuz + Vector2(-12 + flutter, -10)
-	var sol_el: Vector2 = sol_dirsek + Vector2(-6 + flutter * 0.5, -6)
-	draw_line(sol_omuz, sol_dirsek, outline_color, line_width)
-	draw_line(sol_dirsek, sol_el, outline_color, line_width)
-	
-	var sag_omuz: Vector2 = omuz + Vector2(3, 2)
-	var sag_dirsek: Vector2 = sag_omuz + Vector2(12 - flutter, -10)
-	var sag_el: Vector2 = sag_dirsek + Vector2(6 - flutter * 0.5, -6)
-	draw_line(sag_omuz, sag_dirsek, outline_color, line_width)
-	draw_line(sag_dirsek, sag_el, outline_color, line_width)
-	
-	var kafa_merkez: Vector2 = Vector2(flutter * 0.3, -28)
-	draw_circle(kafa_merkez, 12.0, outline_color)
-	draw_circle(kafa_merkez, 10.0, body_color)
-	draw_circle(kafa_merkez + Vector2(3.0 * dir, -2), 2.5, eye_color)
-	
-	draw_circle(kafa_merkez + Vector2(2.0 * dir, 4), 3.0, outline_color)
-	draw_circle(kafa_merkez + Vector2(2.0 * dir, 4), 1.5, Color.BLACK)
-
+func _draw_fall(_dir: float) -> void:
+	var flutter: float = sin(anim_time * 15.0) * 3.0
+	var kalca := Vector2(0.0, KALCA_Y)
+	var omuz := Vector2(0.0, OMUZ_Y)
+	_uzuv_ciz(kalca, kalca + Vector2(-12.0 + flutter, 27.0), UYLUK, BALDIR, 1.0, outline_color)
+	_uzuv_ciz(kalca, kalca + Vector2(12.0 - flutter, 27.0), UYLUK, BALDIR, -1.0, outline_color)
+	_cizgi(kalca, omuz, outline_color)
+	_uzuv_ciz(omuz, omuz + Vector2(-17.0 + flutter, -9.0), PAZU, ONKOL, -1.0, outline_color)
+	_uzuv_ciz(omuz, omuz + Vector2(17.0 - flutter, -9.0), PAZU, ONKOL, 1.0, outline_color)
+	_kafa_ciz(omuz + Vector2(flutter * 0.2, -BOYUN))
 
 func _draw_climb(_dir: float) -> void:
 	# İkonun önünde, sırtı bize dönük: eller sırayla yukarı uzanır, karşı bacak iter
 	var c: float = climb_phase
 	var salinim: float = sin(c) * 1.5
-	var kalca: Vector2 = Vector2(salinim, 7.0)
-	var omuz: Vector2 = Vector2(salinim * 0.5, -17.0)
+	var kalca := Vector2(salinim, KALCA_Y + 2.0)
+	var omuz := Vector2(salinim * 0.5, OMUZ_Y + 1.0)
 	
 	# Uzanan el yukarı çıkar, tutan el aşağı iner (gövde yükselirken)
-	var sol_el: Vector2 = Vector2(-18.0, -31.0 + sin(c) * 6.0)
-	var sag_el: Vector2 = Vector2(18.0, -31.0 - sin(c) * 6.0)
-	var sol_omuz: Vector2 = omuz + Vector2(-6.0, 1.0)
-	var sag_omuz: Vector2 = omuz + Vector2(6.0, 1.0)
+	var sol_el := Vector2(-17.0, OMUZ_Y - 14.0 + sin(c) * 6.0)
+	var sag_el := Vector2(17.0, OMUZ_Y - 14.0 - sin(c) * 6.0)
 	# Karşı bacak: sağ el yukarıdayken sol ayak yukarı çekilir
-	var sol_ayak: Vector2 = Vector2(-8.0, 25.0 - maxf(0.0, -sin(c)) * 9.0)
-	var sag_ayak: Vector2 = Vector2(8.0, 25.0 - maxf(0.0, sin(c)) * 9.0)
+	var sol_ayak := Vector2(-8.0, 26.0 - maxf(0.0, -sin(c)) * 12.0)
+	var sag_ayak := Vector2(8.0, 26.0 - maxf(0.0, sin(c)) * 12.0)
 	
 	_uzuv_ciz(kalca, sol_ayak, UYLUK, BALDIR, 1.0, outline_color)
 	_uzuv_ciz(kalca, sag_ayak, UYLUK, BALDIR, -1.0, outline_color)
-	draw_line(kalca, omuz, outline_color, line_width)
-	draw_line(sol_omuz, sag_omuz, outline_color, line_width)
-	_uzuv_ciz(sol_omuz, sol_el, PAZU, ONKOL, -1.0, outline_color)
-	_uzuv_ciz(sag_omuz, sag_el, PAZU, ONKOL, 1.0, outline_color)
-	
-	# Kafa arkadan (yüz görünmez), kolların önünde
-	var kafa_merkez: Vector2 = omuz + Vector2(salinim * 0.3, -11.0)
-	draw_circle(kafa_merkez, 12.0, outline_color)
-	draw_circle(kafa_merkez, 10.0, body_color)
+	_cizgi(kalca, omuz, outline_color)
+	_uzuv_ciz(omuz, sol_el, PAZU, ONKOL, -1.0, outline_color)
+	_uzuv_ciz(omuz, sag_el, PAZU, ONKOL, 1.0, outline_color)
+	_kafa_ciz(omuz + Vector2(salinim * 0.3, -BOYUN))
 
 func _draw_build(dir: float) -> void:
+	# Hafif çömelmiş, bloğu iki eliyle öne-yukarı kaldırmış
 	var offset: float = sin(Time.get_ticks_msec() / 100.0) * 1.5
-	
-	var govde_alt: Vector2 = Vector2(0, 10)
-	var govde_ust: Vector2 = Vector2(0, -15)
-	var omuz: Vector2 = Vector2(0, -12)
-	
-	draw_line(govde_alt, govde_ust, outline_color, line_width)
-	
-	var sol_diz: Vector2 = Vector2(-8, 25)
-	var sol_ayak: Vector2 = Vector2(-10, 35)
-	var sag_diz: Vector2 = Vector2(8, 25)
-	var sag_ayak: Vector2 = Vector2(10, 35)
-	
-	draw_line(govde_alt, sol_diz, outline_color, line_width)
-	draw_line(sol_diz, sol_ayak, outline_color, line_width)
-	draw_line(govde_alt, sag_diz, outline_color, line_width)
-	draw_line(sag_diz, sag_ayak, outline_color, line_width)
-	
-	# Kollar yukarıda, havada blok tutuyor gibi!
-	var sol_dirsek: Vector2 = Vector2(-15, -25 + offset)
-	var sol_el: Vector2 = Vector2(-5, -40 + offset)
-	var sag_dirsek: Vector2 = Vector2(15, -25 + offset)
-	var sag_el: Vector2 = Vector2(5, -40 + offset)
-	
-	draw_line(omuz, sol_dirsek, outline_color, line_width)
-	draw_line(sol_dirsek, sol_el, outline_color, line_width)
-	draw_line(omuz, sag_dirsek, outline_color, line_width)
-	draw_line(sag_dirsek, sag_el, outline_color, line_width)
-	
-	# Kafa yukarı bakıyor
-	var kafa_merkez: Vector2 = Vector2(0, -28 + offset)
-	draw_circle(kafa_merkez, 12.0, outline_color)
-	draw_circle(kafa_merkez, 10.0, body_color)
-	draw_circle(kafa_merkez + Vector2(0, -5), 2.0, eye_color)
+	var kalca := Vector2(0.0, KALCA_Y + 3.0)
+	var omuz := Vector2(1.0 * dir, OMUZ_Y + 3.0)
+	_uzuv_ciz(kalca, Vector2(-9.0, 27.0), UYLUK, BALDIR, 1.0, outline_color)
+	_uzuv_ciz(kalca, Vector2(9.0, 27.0), UYLUK, BALDIR, -1.0, outline_color)
+	_cizgi(kalca, omuz, outline_color)
+	_kafa_ciz(omuz + Vector2(0.0, -BOYUN))
+	var el := Vector2(13.0 * dir, OMUZ_Y - 13.0 + offset)
+	_uzuv_ciz(omuz, el + Vector2(-2.0 * dir, 0.0), PAZU, ONKOL, dir, outline_color.darkened(0.25))
+	_uzuv_ciz(omuz, el + Vector2(2.0 * dir, 0.0), PAZU, ONKOL, dir, outline_color)
 	
 	# Elinde tuttuğu küçük gri kırıktaş önizlemesi
-	draw_rect(Rect2(-10, -50 + offset, 20, 20), Color(0.5, 0.5, 0.5))
-	draw_rect(Rect2(-10, -50 + offset, 20, 20), Color(0.2, 0.2, 0.2), false, 1.0)
+	var blok := Rect2(el.x - 10.0, el.y - 20.0, 20, 20)
+	draw_rect(blok, Color(0.5, 0.5, 0.5))
+	draw_rect(blok, Color(0.2, 0.2, 0.2), false, 1.0)
 
-func _draw_grabbed(dir: float) -> void:
-	# TUTULMUŞ: Kollar ve bacaklar sarkık, kafa yukarıda (mouse tarafından tutuluyor)
-	var swing: float = sin(anim_time * 3.0) * 4.0  # Hafif sallanma
-	var swing2: float = sin(anim_time * 2.5 + 1.0) * 3.0
-	
-	# KAFA (Üstte, tutulduğu nokta — korkmuş yüz)
-	var kafa_merkez: Vector2 = Vector2(swing * 0.3, -30)
-	draw_circle(kafa_merkez, 12.0, outline_color)
-	draw_circle(kafa_merkez, 10.0, body_color)
-	# Korkmuş gözler (büyük, yuvarlak)
-	draw_circle(kafa_merkez + Vector2(-4, -2), 2.5, eye_color)
-	draw_circle(kafa_merkez + Vector2(4, -2), 2.5, eye_color)
-	# Açık ağız (şaşkın/korkmuş "O")
-	draw_circle(kafa_merkez + Vector2(0, 4), 3.0, outline_color)
-	draw_circle(kafa_merkez + Vector2(0, 4), 1.8, Color(0.3, 0.0, 0.0))
-	
-	# GÖVDE (Sarkık)
-	var omuz: Vector2 = Vector2(swing * 0.4, -18)
-	var kalca: Vector2 = Vector2(swing * 0.8, 10)
-	draw_line(omuz, kalca, outline_color, line_width)
-	
-	# KOLLAR (Yukarıda, tutunmaya çalışıyor)
-	var sol_omuz: Vector2 = omuz + Vector2(-3, 2)
-	var sol_dirsek: Vector2 = sol_omuz + Vector2(-6 + swing2, -12)
-	var sol_el: Vector2 = sol_dirsek + Vector2(-2 + swing, -8)
-	draw_line(sol_omuz, sol_dirsek, outline_color, line_width)
-	draw_line(sol_dirsek, sol_el, outline_color, line_width)
-	
-	var sag_omuz: Vector2 = omuz + Vector2(3, 2)
-	var sag_dirsek: Vector2 = sag_omuz + Vector2(6 - swing2, -12)
-	var sag_el: Vector2 = sag_dirsek + Vector2(2 - swing, -8)
-	draw_line(sag_omuz, sag_dirsek, outline_color, line_width)
-	draw_line(sag_dirsek, sag_el, outline_color, line_width)
-	
-	# BACAKLAR (Sarkık, sallanıyor)
-	var sol_diz: Vector2 = kalca + Vector2(-6 + swing, 12)
-	var sol_ayak: Vector2 = sol_diz + Vector2(-3 + swing2, 12)
-	var sag_diz: Vector2 = kalca + Vector2(6 - swing, 12)
-	var sag_ayak: Vector2 = sag_diz + Vector2(3 - swing2, 12)
-	
-	draw_line(kalca, sol_diz, outline_color, line_width)
-	draw_line(sol_diz, sol_ayak, outline_color, line_width)
-	draw_line(kalca, sag_diz, outline_color, line_width)
-	draw_line(sag_diz, sag_ayak, outline_color, line_width)
-
-func _draw_thrown(dir: float) -> void:
-	# FIRLATILMIŞ: Kollar/bacaklar açık, panikli hava pozu
-	var spin: float = anim_time * 8.0  # Hızlı dönme/sallanma
-	var flutter: float = sin(spin) * 6.0
-	var flutter2: float = cos(spin) * 5.0
-	
-	# KAFA (Panikli)
-	var kafa_merkez: Vector2 = Vector2(flutter * 0.2, -28)
-	draw_circle(kafa_merkez, 12.0, outline_color)
-	draw_circle(kafa_merkez, 10.0, body_color)
-	# Panikli gözler — "X" gözler
-	var goz_sol = kafa_merkez + Vector2(-4, -2)
-	var goz_sag = kafa_merkez + Vector2(4, -2)
-	draw_line(goz_sol + Vector2(-2, -2), goz_sol + Vector2(2, 2), eye_color, 2.0)
-	draw_line(goz_sol + Vector2(2, -2), goz_sol + Vector2(-2, 2), eye_color, 2.0)
-	draw_line(goz_sag + Vector2(-2, -2), goz_sag + Vector2(2, 2), eye_color, 2.0)
-	draw_line(goz_sag + Vector2(2, -2), goz_sag + Vector2(-2, 2), eye_color, 2.0)
-	# Açık çığlık ağzı
-	draw_circle(kafa_merkez + Vector2(0, 5), 3.5, outline_color)
-	draw_circle(kafa_merkez + Vector2(0, 5), 2.0, Color(0.2, 0.0, 0.0))
-	
-	# GÖVDE
-	var omuz: Vector2 = Vector2(flutter * 0.15, -18)
-	var kalca: Vector2 = Vector2(flutter * 0.3, 5)
-	draw_line(omuz, kalca, outline_color, line_width)
-	
-	# KOLLAR (Çılgınca açık, çırpınıyor)
-	var sol_omuz: Vector2 = omuz + Vector2(-3, 2)
-	var sol_dirsek: Vector2 = sol_omuz + Vector2(-14 + flutter, -8 + flutter2)
-	var sol_el: Vector2 = sol_dirsek + Vector2(-8 + flutter2, -4 + flutter)
-	draw_line(sol_omuz, sol_dirsek, outline_color, line_width)
-	draw_line(sol_dirsek, sol_el, outline_color, line_width)
-	
-	var sag_omuz: Vector2 = omuz + Vector2(3, 2)
-	var sag_dirsek: Vector2 = sag_omuz + Vector2(14 - flutter, -8 - flutter2)
-	var sag_el: Vector2 = sag_dirsek + Vector2(8 - flutter2, -4 - flutter)
-	draw_line(sag_omuz, sag_dirsek, outline_color, line_width)
-	draw_line(sag_dirsek, sag_el, outline_color, line_width)
-	
-	# BACAKLAR (Açık ve çırpınıyor)
-	var sol_diz: Vector2 = kalca + Vector2(-10 + flutter, 10 + flutter2 * 0.5)
-	var sol_ayak: Vector2 = sol_diz + Vector2(-6 + flutter2, 10)
-	var sag_diz: Vector2 = kalca + Vector2(10 - flutter, 10 - flutter2 * 0.5)
-	var sag_ayak: Vector2 = sag_diz + Vector2(6 - flutter2, 10)
-	
-	draw_line(kalca, sol_diz, outline_color, line_width)
-	draw_line(sol_diz, sol_ayak, outline_color, line_width)
-	draw_line(kalca, sag_diz, outline_color, line_width)
-	draw_line(sag_diz, sag_ayak, outline_color, line_width)
+func _draw_ragdoll() -> void:
+	var t := PackedVector2Array()
+	for p in r_nokta:
+		t.append((p - global_position) / BOYUT)
+	var arka_renk: Color = outline_color.darkened(0.25)
+	_cizgi(t[R_OMUZ], t[R_DIRSEK_A], arka_renk)
+	_cizgi(t[R_DIRSEK_A], t[R_EL_A], arka_renk)
+	_cizgi(t[R_KALCA], t[R_DIZ_A], arka_renk)
+	_cizgi(t[R_DIZ_A], t[R_AYAK_A], arka_renk)
+	_cizgi(t[R_OMUZ], t[R_KALCA], outline_color)
+	_cizgi(t[R_KALCA], t[R_DIZ_B], outline_color)
+	_cizgi(t[R_DIZ_B], t[R_AYAK_B], outline_color)
+	_kafa_ciz(t[R_KAFA], (t[R_KAFA] - t[R_OMUZ]).angle() + PI / 2.0)
+	_cizgi(t[R_OMUZ], t[R_DIRSEK_B], outline_color)
+	_cizgi(t[R_DIRSEK_B], t[R_EL_B], outline_color)
 
 # ============================================================
 # 4. AI (YAPAY ZEKA) KONTROL ARAYÜZÜ
@@ -773,6 +851,7 @@ func _blok_sigar_mi(pos: Vector2) -> bool:
 	query.shape = rect
 	query.transform = Transform2D(0, pos)
 	query.exclude = [self.get_rid()]
+	query.collision_mask = 0xFFFFFFFF & ~(1 << (KiritasBlok.RAGDOLL_KATMANI - 1))
 	
 	for sonuc in space_state.intersect_shape(query):
 		var cisim = sonuc["collider"]
@@ -856,7 +935,7 @@ func _adim_bitti() -> void:
 		move_direction = 0
 		if hedef_isim != "":
 			print("Hedefe ulaşıldı: ", hedef_isim)
-		rota_tamamlandi.emit()
+		rota_tamamlandi.emit(true)
 
 func _yeniden_planla(neden: String) -> void:
 	print("Yeniden plan (", neden, ")")
@@ -869,7 +948,7 @@ func _yeniden_planla(neden: String) -> void:
 	if yeni.is_empty():
 		print("Vazgeçildi: ", hedef_isim)
 		plan.clear()
-		rota_tamamlandi.emit()
+		rota_tamamlandi.emit(false)
 		return
 	_plani_baslat(yeni)
 
