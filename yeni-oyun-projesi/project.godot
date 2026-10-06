@@ -29,6 +29,7 @@ window/per_pixel_transparency/allowed=true
 [physics]
 
 3d/physics_engine="Jolt Physics"
+common/physics_interpolation=true
 
 [rendering]
 

@@ -14,7 +14,12 @@ func _ready() -> void:
 	var dikdortgen = RectangleShape2D.new()
 	dikdortgen.size = Vector2(40, 40)
 	sekil.shape = dikdortgen
+	# İkonlar gibi tek yönlü: kuleler/köprüler yolu duvar gibi kapatmasın
+	sekil.one_way_collision = true
+	sekil.one_way_collision_margin = 4.0
 	add_child(sekil)
+	collision_layer = 0
+	set_collision_layer_value(3, true)
 	
 	# 2. Görsel: Ana Gri Kutu (ColorRect)
 	ana_renk = ColorRect.new()

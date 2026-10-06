@@ -4,14 +4,32 @@ extends Node2D
 var nav: Navigasyon = null
 var ikon_verileri: Array = []  # harita.json'dan okunan ikon listesi
 var hedef_zamanlayici: Timer = null
-const HEDEF_BEKLEME_SURESI = 5.0  # Hedefe varınca kaç sn bekle
+const HEDEF_BEKLEME_SURESI_MIN = 2.0  # Hedefe varınca min bekleme
+const HEDEF_BEKLEME_SURESI_MAX = 8.0  # Hedefe varınca max bekleme
+
+const IKON_KATMANI = 3  # İkonlar ve bloklar: tek yönlü platform katmanı (stickman.gd ile aynı)
 
 # Modlar
 @export var otomatik_mod: bool = true # True=Kendi gezer, False=Fareyle komut bekler
 
-# --- MANUEL HEDEFLEME (Sürükle & Bırak) ---
+# --- MOUSE İLE TUTMA & FIRLATMA (sol tık) ---
+var tutulmus: bool = false                    # Stickman tutulmuş mu?
+var fare_pozisyonu: Vector2 = Vector2.ZERO    # Güncel fare pozisyonu
+const TUTMA_YARICAPI = 50.0
+const FIRLATMA_SONRASI_BEKLEME = 1.0          # Kendine geldikten sonra AI'ın yeniden başlaması
+
+# --- TIKLAMA GEÇİRME ALANI ---
+# window_set_mouse_passthrough pahalı; her kare çağırmak hareketi takıltıyordu
+const GECIS_GUNCELLEME_MESAFESI = 12.0
+var _son_gecis_pozisyonu: Vector2 = Vector2(INF, INF)
+var _son_blok_sayisi: int = -1
+var _gecis_kapali: bool = false
+
+var son_hedefler: Array = []                   # Son gidilen hedefler (tekrar engeli)
+const SON_HEDEF_HAFIZA = 3                     # Kaç hedef hatırla
+
+# --- MANUEL HEDEFLEME (sağ tık sürükle & bırak) ---
 var surukleniyor: bool = false
-var fare_pozisyonu: Vector2 = Vector2.ZERO
 
 func _ready() -> void:
 	
@@ -81,7 +99,9 @@ func _ready() -> void:
 	if stickman:
 		stickman.rota_tamamlandi.connect(_hedefe_varildi)
 		stickman.blok_koy.connect(_blok_yerlestir)
+		stickman.yere_indi.connect(_firlatmadan_kurtuldu)
 		stickman.OYUNCU_KONTROLU = false  # AI kontrolüne geç
+		stickman.nav = nav
 		# İlk hedefi 2 saniye sonra seç (düşüp yere insene kadar bekle)
 		hedef_zamanlayici = Timer.new()
 		hedef_zamanlayici.one_shot = true
@@ -94,64 +114,83 @@ func _ready() -> void:
 # Her frame'de stickman etrafındaki tıklanabilir alanı güncelle
 func _process(_delta: float) -> void:
 	var stickman_node = get_node_or_null("Stickman")
-	if stickman_node:
-		var pos = stickman_node.global_position
-		var r = 50.0  # Tıklanabilir alan yarıçapı
-		
-		var raw_polys: Array[PackedVector2Array] = []
-		
-		# 1. Çöp adamın poligonu
-		var s_rect = Rect2(pos.x - r, pos.y - 60, r * 2.0, 95.0)
+	if not stickman_node:
+		return
+	
+	# --- TIKLANABILIR ALAN ---
+	# Tutarken/sürüklerken tüm pencere fareyi yakalasın ki hızlı savurmada kaçmasın
+	if tutulmus or surukleniyor:
+		if not _gecis_kapali:
+			DisplayServer.window_set_mouse_passthrough(PackedVector2Array())
+			_gecis_kapali = true
+		return
+	
+	var pos = stickman_node.global_position
+	var bloklar = get_tree().get_nodes_in_group("bloklar")
+	if not _gecis_kapali and bloklar.size() == _son_blok_sayisi \
+			and pos.distance_to(_son_gecis_pozisyonu) < GECIS_GUNCELLEME_MESAFESI:
+		return
+	_gecis_kapali = false
+	_son_gecis_pozisyonu = pos
+	_son_blok_sayisi = bloklar.size()
+	_gecis_alanini_guncelle(pos, bloklar)
+
+func _gecis_alanini_guncelle(pos: Vector2, bloklar: Array) -> void:
+	var r = TUTMA_YARICAPI + GECIS_GUNCELLEME_MESAFESI
+	
+	var raw_polys: Array[PackedVector2Array] = []
+	
+	# 1. Çöp adamın poligonu
+	var s_rect = Rect2(pos.x - r, pos.y - 60 - GECIS_GUNCELLEME_MESAFESI, r * 2.0, 95.0 + GECIS_GUNCELLEME_MESAFESI * 2.0)
+	raw_polys.append(PackedVector2Array([
+		s_rect.position,
+		Vector2(s_rect.end.x, s_rect.position.y),
+		s_rect.end,
+		Vector2(s_rect.position.x, s_rect.end.y)
+	]))
+	
+	# 2. Blokların poligonları
+	for blok in bloklar:
+		var b_pos = blok.global_position
+		var b_rect = Rect2(b_pos.x - 20, b_pos.y - 20, 40.0, 40.0)
 		raw_polys.append(PackedVector2Array([
-			s_rect.position,
-			Vector2(s_rect.end.x, s_rect.position.y),
-			s_rect.end,
-			Vector2(s_rect.position.x, s_rect.end.y)
+			b_rect.position,
+			Vector2(b_rect.end.x, b_rect.position.y),
+			b_rect.end,
+			Vector2(b_rect.position.x, b_rect.end.y)
 		]))
-		
-		# 2. Blokların poligonları
-		var bloklar = get_tree().get_nodes_in_group("bloklar")
-		for blok in bloklar:
-			var b_pos = blok.global_position
-			var b_rect = Rect2(b_pos.x - 20, b_pos.y - 20, 40.0, 40.0)
-			raw_polys.append(PackedVector2Array([
-				b_rect.position,
-				Vector2(b_rect.end.x, b_rect.position.y),
-				b_rect.end,
-				Vector2(b_rect.position.x, b_rect.end.y)
-			]))
-		
-		# 3. Kesişen poligonları birleştir (Geometry2D ile)
-		var merged_polys: Array[PackedVector2Array] = []
-		for p in raw_polys:
-			if merged_polys.is_empty():
-				merged_polys.append(p)
-			else:
-				var new_merged: Array[PackedVector2Array] = []
-				var to_merge = p
-				for mp in merged_polys:
-					var union_res = Geometry2D.merge_polygons(to_merge, mp)
-					if union_res.size() == 1:
-						to_merge = union_res[0] # Kesiştiler, birleştiler!
-					else:
-						new_merged.append(mp) # Kesişmediler
-				new_merged.append(to_merge)
-				merged_polys = new_merged
-				
-		# 4. Ayrık poligonları 0 piksellik görünmez çizgilerle tek poligona bağla
-		var final_poly = PackedVector2Array()
-		if merged_polys.size() > 0:
-			final_poly.append_array(merged_polys[0])
-			var base_point = merged_polys[0][0]
-			for i in range(1, merged_polys.size()):
-				var next_poly = merged_polys[i]
-				final_poly.append(base_point)
-				final_poly.append(next_poly[0])
-				final_poly.append_array(next_poly)
-				final_poly.append(next_poly[0])
-				final_poly.append(base_point)
-				
-		DisplayServer.window_set_mouse_passthrough(final_poly)
+	
+	# 3. Kesişen poligonları birleştir (Geometry2D ile)
+	var merged_polys: Array[PackedVector2Array] = []
+	for p in raw_polys:
+		if merged_polys.is_empty():
+			merged_polys.append(p)
+		else:
+			var new_merged: Array[PackedVector2Array] = []
+			var to_merge = p
+			for mp in merged_polys:
+				var union_res = Geometry2D.merge_polygons(to_merge, mp)
+				if union_res.size() == 1:
+					to_merge = union_res[0] # Kesiştiler, birleştiler!
+				else:
+					new_merged.append(mp) # Kesişmediler
+			new_merged.append(to_merge)
+			merged_polys = new_merged
+			
+	# 4. Ayrık poligonları 0 piksellik görünmez çizgilerle tek poligona bağla
+	var final_poly = PackedVector2Array()
+	if merged_polys.size() > 0:
+		final_poly.append_array(merged_polys[0])
+		var base_point = merged_polys[0][0]
+		for i in range(1, merged_polys.size()):
+			var next_poly = merged_polys[i]
+			final_poly.append(base_point)
+			final_poly.append(next_poly[0])
+			final_poly.append_array(next_poly)
+			final_poly.append(next_poly[0])
+			final_poly.append(base_point)
+			
+	DisplayServer.window_set_mouse_passthrough(final_poly)
 # Fonksiyonu şimdi tanımlıyoruz
 func haritayükle(dosyayolu: String) -> void:
 
@@ -186,6 +225,12 @@ func haritayükle(dosyayolu: String) -> void:
 		kutugeo.size = Vector2(genislik, yukseklik)	
 		
 		carpisma_alani.shape = kutugeo # Şekli algılayıcıya taktık
+		# Tek yönlü platform: içinden geçilir, sadece üstüne basılır
+		carpisma_alani.one_way_collision = true
+		carpisma_alani.one_way_collision_margin = 4.0
+		zemin.collision_layer = 0
+		zemin.set_collision_layer_value(IKON_KATMANI, true)
+		zemin.add_to_group("ikonlar")
 		
 		var merkez_x = float(ikon["x"]) + (genislik / 2.0)
 		var merkez_y = float(ikon["y"]) + (yukseklik / 2.0)
@@ -207,8 +252,14 @@ func _yeni_hedef_sec() -> void:
 	var stickman = get_node_or_null("Stickman")
 	if not stickman or not nav:
 		return
-		
-	var hedef = nav.rastgele_hedef_sec()
+	
+	# --- %25 İHTİMALLE AYLAK DOLAŞMA ---
+	if randf() < 0.25:
+		_aylak_dolasmaya_basla(stickman)
+		return
+	
+	# Normal hedef seçimi (son gidilen hedeflerden kaçın)
+	var hedef = _tekrarsiz_hedef_sec()
 	if hedef.is_empty():
 		print("Gidilecek ikon bulunamadı!")
 		hedef_zamanlayici.wait_time = 2.0
@@ -216,25 +267,53 @@ func _yeni_hedef_sec() -> void:
 		return
 		
 	print("Yeni hedef: ", hedef["isim"])
-	var rota = nav.yol_bul(stickman.global_position, hedef["isim"])
 	
-	if rota.size() > 0:
-		# A* rota buldu, normal yürü/zıpla
-		stickman.rotayi_ayarla(rota)
-	else:
-		# A* rota bulamadı → İNŞAAT MODU
-		# Hedefin pozisyonunu al, inşaat moduna geç
-		var hedef_pos = nav.hedef_pozisyon_bul(hedef["isim"])
-		if hedef_pos != Vector2.ZERO:
-			stickman.insaat_baslat(hedef["isim"], hedef_pos)
-		else:
-			hedef_zamanlayici.wait_time = 1.0
-			hedef_zamanlayici.start()
+	# Son hedef listesine ekle
+	son_hedefler.append(hedef["isim"])
+	if son_hedefler.size() > SON_HEDEF_HAFIZA:
+		son_hedefler.pop_front()
+	
+	if not stickman.hedefe_git(hedef["isim"]):
+		hedef_zamanlayici.wait_time = 1.0
+		hedef_zamanlayici.start()
+
+func _tekrarsiz_hedef_sec() -> Dictionary:
+	"""Son gidilen hedefleri atla, farklı bir hedef seç."""
+	var tum_hedefler: Array = nav.hedefler()
+	
+	if tum_hedefler.is_empty():
+		return {}
+	
+	# Son gidilen hedefleri filtrele
+	var filtreli: Array = []
+	for h in tum_hedefler:
+		if h["isim"] not in son_hedefler:
+			filtreli.append(h)
+	
+	# Eğer tüm hedefler son gidilenler arasındaysa, filtre olmadan seç
+	if filtreli.is_empty():
+		filtreli = tum_hedefler
+	
+	return filtreli[randi() % filtreli.size()]
+
+func _aylak_dolasmaya_basla(stickman) -> void:
+	"""Hedefsiz, üstünde durduğu yüzeyde rastgele ileri-geri yürü."""
+	var mesafe = randf_range(200.0, 500.0) * (1 if randf() > 0.5 else -1)
+	# Varınca rota_tamamlandi ile normal bekleme döngüsüne döner
+	if not stickman.aylak_yuru(mesafe):
+		hedef_zamanlayici.wait_time = 0.5
+		hedef_zamanlayici.start()
+
+func _firlatmadan_kurtuldu() -> void:
+	if otomatik_mod and not tutulmus:
+		hedef_zamanlayici.wait_time = FIRLATMA_SONRASI_BEKLEME
+		hedef_zamanlayici.start()
 
 func _hedefe_varildi() -> void:
 	print("Hedefe ulaşıldı! Bekleniyor...")
 	if otomatik_mod:
-		hedef_zamanlayici.wait_time = HEDEF_BEKLEME_SURESI
+		var bekleme = randf_range(HEDEF_BEKLEME_SURESI_MIN, HEDEF_BEKLEME_SURESI_MAX)
+		hedef_zamanlayici.wait_time = bekleme
 		hedef_zamanlayici.start()
 
 # ============================================================
@@ -256,15 +335,24 @@ func _input(event: InputEvent) -> void:
 				_yeni_hedef_sec()
 			else:
 				print("MANUEL MOD: AÇIK (Sürükle-bırak bekleniyor)")
-				stickman.ai_stop()
-				stickman.hedef_rota.clear()
+				stickman.plani_iptal()
 				hedef_zamanlayici.stop()
 				
-	# Fare Tıklaması
+	# Sol tık: tut, savur, bırakınca fırlat
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
 		if event.pressed:
-			# Stickman'e tıklandı mı? (50 piksel yakınlık)
-			if event.position.distance_to(stickman.global_position) < 50.0:
+			if not surukleniyor and event.position.distance_to(stickman.global_position) < TUTMA_YARICAPI:
+				tutulmus = true
+				hedef_zamanlayici.stop()
+				stickman.yakala()
+		elif tutulmus:
+			tutulmus = false
+			stickman.birak()
+
+	# Sağ tık: sürükleyip bırakarak hedef göster
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
+		if event.pressed:
+			if not tutulmus and event.position.distance_to(stickman.global_position) < TUTMA_YARICAPI:
 				surukleniyor = true
 				fare_pozisyonu = event.position
 				hedef_zamanlayici.stop()  # Rastgele dolaşmayı durdur
@@ -299,24 +387,18 @@ func _manuel_hedef_belirle(birakma_noktasi: Vector2) -> void:
 	var en_yakin_isim = ""
 	var min_mesafe = 999999.0
 	
-	for id in nav.platformlar:
-		var p = nav.platformlar[id]
-		# Görev çubuğunu da seçebilsin
-		var mesafe = birakma_noktasi.distance_to(p["pozisyon"])
+	# Görev çubuğunu da seçebilsin
+	for s in nav.yuzeyler:
+		var en_yakin_nokta = Vector2(clampf(birakma_noktasi.x, s["x0"], s["x1"]),
+				clampf(birakma_noktasi.y, s["y"], s["y"] + s["h"]))
+		var mesafe = birakma_noktasi.distance_to(en_yakin_nokta)
 		if mesafe < min_mesafe:
 			min_mesafe = mesafe
-			en_yakin_isim = p["isim"]
+			en_yakin_isim = s["isim"]
 			
 	if en_yakin_isim != "":
 		print("Manuel hedef: ", en_yakin_isim)
-		var rota = nav.yol_bul(stickman.global_position, en_yakin_isim)
-		if rota.size() > 0:
-			stickman.rotayi_ayarla(rota)
-		else:
-			# Ulaşım yoksa nerd-poling moduna gir
-			var hedef_pos = nav.hedef_pozisyon_bul(en_yakin_isim)
-			if hedef_pos != Vector2.ZERO:
-				stickman.insaat_baslat(en_yakin_isim, hedef_pos)
+		stickman.hedefe_git(en_yakin_isim)
 
 # ============================================================
 # İNŞAAT (BUILDER) SİSTEMİ
